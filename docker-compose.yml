@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: nexus-auction-db
+    environment:
+      POSTGRES_DB: auction_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5436:5432"
+    volumes:
+      - auction_db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d auction_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexus-auction-service
+    ports:
+      - "8005:8005"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__DefaultConnection=Host=db;Port=5432;Database=auction_db;Username=postgres;Password=postgres
+      - RabbitMq__Host=host.docker.internal
+      - RabbitMq__Port=5672
+      - RabbitMq__User=guest
+      - RabbitMq__Password=guest
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  auction_db_data:
