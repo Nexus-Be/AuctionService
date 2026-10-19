@@ -33,3 +33,22 @@ bld/
 ._*
 Thumbs.db
 ehthumbs.db
+
+## Environment Variables & Secrets (DO NOT COMMIT)
+.env
+.env.*
+.env.local
+!.env.example
+!.env.*.example
+*.pfx
+*.pem
+*.cer
+*.key
+secrets.json
+.secrets/
+
+## Appsettings & Secrets (DO NOT COMMIT ORIGINALS - ONLY COMMIT *.example*)
+appsettings*.json
+!appsettings*.example.json
+!appsettings.example.json
+!appsettings.*.example.json
