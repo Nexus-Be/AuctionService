@@ -31,7 +31,7 @@
 ## 2. QUY CHUẨN CƠ SỞ DỮ LIỆU & EF CORE
 
 - Engine: PostgreSQL.
-- Database: `auction_db` tại port `5436`.
-- Chuỗi kết nối: `Host=localhost;Port=5436;Database=auction_db;Username=postgres;Password=...`.
+- Database: `auction_db` tại port `5437`.
+- Chuỗi kết nối: `Host=localhost;Port=5437;Database=auction_db;Username=postgres;Password=MatkhaucuaTui123@`.
 - Tên bảng: `auctions`, `bids`.
 - **No Repository Pattern**: Tầng Application tương tác trực tiếp với `AuctionDbContext`.

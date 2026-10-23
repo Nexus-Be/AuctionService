@@ -23,5 +23,5 @@ dotnet run --project Auction.Api
 - [ ] **Biên dịch thành công 100%**: Không lỗi cảnh báo nghiêm trọng.
 - [ ] **Không vi phạm rào chắn**: Không dùng Repository Pattern bọc ngoài EF Core.
 - [ ] **Bảo đảm Concurrency**: Logic đặt giá bid phải có cơ chế chống race condition.
-- [ ] **Port & Database**: Lắng nghe đúng port `8005`, kết nối `auction_db` trên port `5436`.
+- [ ] **Port & Database**: Lắng nghe đúng port `8005`, kết nối `auction_db` trên port `5437` (Password: `MatkhaucuaTui123@`).
 - [ ] **Git Status**: Không commit file rác (`bin/`, `obj/`, `.idea/`, `.env`).

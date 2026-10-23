@@ -25,6 +25,6 @@
 3. **SELLER KHÔNG ĐƯỢC TỰ BID TRÊN PHIÊN CỦA CHÍNH MÌNH**:
    - Nghiệp vụ cấm seller tự đặt giá để đẩy giá ảo (shill bidding).
 
-4. **TUYỆT ĐỐI KHÔNG THAY ĐỔI CỔNG 8005 VÀ DATABASE 5436**:
+4. **TUYỆT ĐỐI KHÔNG THAY ĐỔI CỔNG 8005 VÀ DATABASE 5437**:
    - Service gRPC chạy tại `http://localhost:8005`.
-   - Chuỗi kết nối DB trỏ tới `localhost:5436/auction_db`.
+   - Chuỗi kết nối DB trỏ tới `localhost:5437/auction_db` với mật khẩu mặc định `MatkhaucuaTui123@`.
