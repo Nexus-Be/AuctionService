@@ -22,9 +22,10 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d auction_db"]
-      interval: 5s
-      timeout: 3s
+      interval: 1m
+      timeout: 30s
       retries: 5
+      start_period: 60s
 
   # 2. Ứng dụng Auction Service gRPC (Port 8005)
   auction-service:
