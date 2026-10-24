@@ -12,7 +12,7 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace Auction.Infrastructure.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20261024082539_InitialAuctionSchema")]
+    [Migration("20261024103234_InitialAuctionSchema")]
     partial class InitialAuctionSchema
     {
         /// <inheritdoc />
@@ -96,6 +96,29 @@ namespace Auction.Infrastructure.Migrations
                     b.HasIndex("RecreatedFromAuctionId");
 
                     b.ToTable("Auctions");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = new Guid("aa000000-0000-0000-0000-000000000001"),
+                            AntiSnipingExtensionMinutes = 5,
+                            BidStepAmount = 50000m,
+                            CreatedAt = new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
+                            CreatedBy = new Guid("cccccccc-3333-3333-3333-333333333333"),
+                            IsDeleted = false,
+                            MaxExtensionCount = 10,
+                            MinReputationToBid = 40,
+                            MinReputationToSell = 50,
+                            OriginalEndAt = new DateTimeOffset(new DateTime(2026, 1, 8, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
+                            ProductId = new Guid("44000000-0000-0000-0000-000000000004"),
+                            ScheduledStartAt = new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
+                            SellerId = new Guid("cccccccc-3333-3333-3333-333333333333"),
+                            SkuId = new Guid("44100000-0000-0000-0000-000000000004"),
+                            SnapshotProductTitle = "Mũ Bảo Hiểm Xe Đạp Nexus Aero - Đỏ / Size M",
+                            StartPriceAmount = 500000m,
+                            UpdatedAt = new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
+                            UpdatedBy = new Guid("00000000-0000-0000-0000-000000000000")
+                        });
                 });
 
             modelBuilder.Entity("Auction.Domain.Entities.AuctionConfig", b =>
@@ -341,6 +364,24 @@ namespace Auction.Infrastructure.Migrations
                         .IsUnique();
 
                     b.ToTable("AuctionStates");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = new Guid("aa100000-0000-0000-0000-000000000001"),
+                            AuctionId = new Guid("aa000000-0000-0000-0000-000000000001"),
+                            BidCount = 1,
+                            CreatedAt = new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
+                            CurrentPriceAmount = 600000m,
+                            CurrentWinnerId = new Guid("dddddddd-4444-4444-4444-444444444444"),
+                            ExtensionCount = 0,
+                            IsDeleted = false,
+                            RowVersion = 1L,
+                            ScheduledEndAt = new DateTimeOffset(new DateTime(2026, 1, 8, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
+                            StartedAt = new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
+                            Status = "Running",
+                            UpdatedAt = new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0))
+                        });
                 });
 
             modelBuilder.Entity("Auction.Domain.Entities.AuctionStatusHistory", b =>
@@ -492,6 +533,20 @@ namespace Auction.Infrastructure.Migrations
                     b.HasIndex("AuctionId");
 
                     b.ToTable("Bids");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = new Guid("aa300000-0000-0000-0000-000000000001"),
+                            Amount = 600000m,
+                            AuctionId = new Guid("aa000000-0000-0000-0000-000000000001"),
+                            BidSeq = 1,
+                            BidderId = new Guid("dddddddd-4444-4444-4444-444444444444"),
+                            CreatedAt = new DateTimeOffset(new DateTime(2026, 1, 1, 2, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
+                            IsDeleted = false,
+                            PlacedAt = new DateTimeOffset(new DateTime(2026, 1, 1, 2, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
+                            UpdatedAt = new DateTimeOffset(new DateTime(2026, 1, 1, 2, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0))
+                        });
                 });
 
             modelBuilder.Entity("Auction.Domain.Entities.BidHistory", b =>
@@ -668,6 +723,17 @@ namespace Auction.Infrastructure.Migrations
                         .IsUnique();
 
                     b.ToTable("ProductOpenAuctions");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = new Guid("aa200000-0000-0000-0000-000000000001"),
+                            AuctionId = new Guid("aa000000-0000-0000-0000-000000000001"),
+                            CreatedAt = new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
+                            IsDeleted = false,
+                            ProductId = new Guid("44000000-0000-0000-0000-000000000004"),
+                            UpdatedAt = new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0))
+                        });
                 });
 
             modelBuilder.Entity("MassTransit.EntityFrameworkCoreIntegration.InboxState", b =>

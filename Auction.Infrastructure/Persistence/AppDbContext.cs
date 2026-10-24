@@ -29,7 +29,7 @@ public class AppDbContext : DbContext, IAuctionDbContext
     {
         base.OnModelCreating(modelBuilder);
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(AppDbContext).Assembly);
-        Seeds.AuctionSeedData.SeedAuctionConfigs(modelBuilder);
+        Seeds.AuctionSeedData.SeedAll(modelBuilder);
 
         // MassTransit Transactional Outbox entities
         modelBuilder.AddInboxStateEntity();

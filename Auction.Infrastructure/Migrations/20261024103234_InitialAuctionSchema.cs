@@ -456,6 +456,26 @@ namespace Auction.Infrastructure.Migrations
                 columns: new[] { "Id", "ConfigKey", "ConfigValue", "CreatedAt", "DeletedAt", "Description", "IsActive", "IsDeleted", "UpdatedAt", "UpdatedBy", "Version" },
                 values: new object[] { new Guid("cccccccc-cccc-cccc-cccc-cccccccccccc"), "DEFAULT_AUCTION_POLICY", "{\"antiSnipingExtensionMinutes\": 5, \"maxExtensionCount\": 10, \"minReputationToBid\": 40, \"minReputationToSell\": 50}", new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), null, "Chính sách tham gia và chống bắn tỉa mặc định toàn sàn", true, false, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), null, 1 });
 
+            migrationBuilder.InsertData(
+                table: "Auctions",
+                columns: new[] { "Id", "AntiSnipingExtensionMinutes", "BidStepAmount", "CreatedAt", "CreatedBy", "DeletedAt", "IsDeleted", "MaxExtensionCount", "MinReputationToBid", "MinReputationToSell", "OriginalEndAt", "ProductId", "RecreatedFromAuctionId", "ScheduledStartAt", "SellerId", "SkuId", "SnapshotProductTitle", "StartPriceAmount", "UpdatedAt", "UpdatedBy" },
+                values: new object[] { new Guid("aa000000-0000-0000-0000-000000000001"), 5, 50000m, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("cccccccc-3333-3333-3333-333333333333"), null, false, 10, 40, 50, new DateTimeOffset(new DateTime(2026, 1, 8, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("44000000-0000-0000-0000-000000000004"), null, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("cccccccc-3333-3333-3333-333333333333"), new Guid("44100000-0000-0000-0000-000000000004"), "Mũ Bảo Hiểm Xe Đạp Nexus Aero - Đỏ / Size M", 500000m, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("00000000-0000-0000-0000-000000000000") });
+
+            migrationBuilder.InsertData(
+                table: "AuctionStates",
+                columns: new[] { "Id", "AuctionId", "BidCount", "CreatedAt", "CurrentPriceAmount", "CurrentWinnerId", "DeletedAt", "EndedAt", "ExtensionCount", "IsDeleted", "RowVersion", "ScheduledEndAt", "StartedAt", "Status", "UpdatedAt" },
+                values: new object[] { new Guid("aa100000-0000-0000-0000-000000000001"), new Guid("aa000000-0000-0000-0000-000000000001"), 1, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), 600000m, new Guid("dddddddd-4444-4444-4444-444444444444"), null, null, 0, false, 1L, new DateTimeOffset(new DateTime(2026, 1, 8, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), "Running", new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) });
+
+            migrationBuilder.InsertData(
+                table: "Bids",
+                columns: new[] { "Id", "Amount", "AuctionId", "BidSeq", "BidderId", "CreatedAt", "DeletedAt", "IsDeleted", "PlacedAt", "UpdatedAt" },
+                values: new object[] { new Guid("aa300000-0000-0000-0000-000000000001"), 600000m, new Guid("aa000000-0000-0000-0000-000000000001"), 1, new Guid("dddddddd-4444-4444-4444-444444444444"), new DateTimeOffset(new DateTime(2026, 1, 1, 2, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), null, false, new DateTimeOffset(new DateTime(2026, 1, 1, 2, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new DateTimeOffset(new DateTime(2026, 1, 1, 2, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) });
+
+            migrationBuilder.InsertData(
+                table: "ProductOpenAuctions",
+                columns: new[] { "Id", "AuctionId", "CreatedAt", "DeletedAt", "IsDeleted", "ProductId", "UpdatedAt" },
+                values: new object[] { new Guid("aa200000-0000-0000-0000-000000000001"), new Guid("aa000000-0000-0000-0000-000000000001"), new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), null, false, new Guid("44000000-0000-0000-0000-000000000004"), new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) });
+
             migrationBuilder.CreateIndex(
                 name: "IX_AuctionExtensions_AuctionId",
                 table: "AuctionExtensions",
