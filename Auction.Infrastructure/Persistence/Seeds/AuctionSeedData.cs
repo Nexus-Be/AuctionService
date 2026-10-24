@@ -8,6 +8,7 @@ public static class AuctionSeedData
     public static void SeedAuctionConfigs(ModelBuilder modelBuilder)
     {
         var configId = Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc");
+        var seedDate = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
         modelBuilder.Entity<AuctionConfig>().HasData(
             new AuctionConfig
@@ -18,8 +19,8 @@ public static class AuctionSeedData
                 Description = "Chính sách tham gia và chống bắn tỉa mặc định toàn sàn",
                 Version = 1,
                 IsActive = true,
-                CreatedAt = DateTimeOffset.UtcNow,
-                UpdatedAt = DateTimeOffset.UtcNow,
+                CreatedAt = seedDate,
+                UpdatedAt = seedDate,
                 IsDeleted = false
             }
         );
