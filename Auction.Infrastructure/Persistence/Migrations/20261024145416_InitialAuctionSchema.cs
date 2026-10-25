@@ -4,7 +4,7 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
 #nullable disable
 
-namespace Auction.Infrastructure.Migrations
+namespace Auction.Infrastructure.Persistence.Migrations
 {
     /// <inheritdoc />
     public partial class InitialAuctionSchema : Migration
