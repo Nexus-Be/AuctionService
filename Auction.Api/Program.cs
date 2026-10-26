@@ -19,12 +19,16 @@ builder.WebHost.ConfigureKestrel(options =>
 builder.Services.AddApplicationServices();
 builder.Services.AddInfrastructureServices(builder.Configuration);
 
-// 2. Swagger / OpenAPI
+// 2. Swagger / OpenAPI & JSON Serialization
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
-    options.SerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
+    options.SerializerOptions.Converters.Add(new Auction.Api.Common.Converters.PascalCaseJsonStringEnumConverter(allowIntegerValues: false));
+});
+builder.Services.Configure<Microsoft.AspNetCore.Mvc.JsonOptions>(options =>
+{
+    options.JsonSerializerOptions.Converters.Add(new Auction.Api.Common.Converters.PascalCaseJsonStringEnumConverter(allowIntegerValues: false));
 });
 
 var app = builder.Build();
