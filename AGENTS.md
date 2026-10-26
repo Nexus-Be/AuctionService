@@ -72,6 +72,10 @@ Khi bắt đầu làm việc tại AuctionService, AI Agent **BẮT BUỘC PHẢ
 3. **CẤU HÌNH PORT LÀ BẤT BIẾN, NHƯNG PHẢI NÓI ĐÚNG MÔI TRƯỜNG**: container `8005` (`Dockerfile:3-4`, `docker-compose.yml:37`); chạy local `5230`/`7202` (`Auction.Api/Properties/launchSettings.json:17,27`); DB `5437`.
 4. **HỢP ĐỒNG PROTOBUF DUY NHẤT — NHƯNG CHƯA TỒN TẠI TRONG REPO NÀY**: hiện **0 file `.proto`**, **0 package `Grpc.AspNetCore`**. Không được viết tài liệu/PR tham chiếu `Auction.Api/Services/AuctionGrpcService.cs` hay `Auction.Api/Contracts/shop.proto` như thể chúng đã có.
 5. **KHÔNG ĐƯỢC COI `/health` LÀ BẰNG CHỨNG "SERVICE HOẠT ĐỘNG"**: endpoint trả `Healthy` vô điều kiện, không kiểm tra DB/RabbitMQ (`Program.cs:58`).
+6. **CẤM TỰ Ý SỬA ĐỔI BIẾN MÔI TRƯỜNG, SECRET VÀ KEY BÍ MẬT (MANDATORY HUMAN-IN-THE-LOOP FOR SECRETS)**:
+   - **Tuyệt đối CẤM mọi AI Coding Agent tự ý sửa đổi, thay thế, xóa hoặc ghi đè các biến môi trường (`.env`, `.env.*`), Connection Strings, API Keys, JWT Secrets, chứng chỉ hoặc bất kỳ thông tin bí mật (credentials/secrets) nào trong toàn bộ hệ thống.**
+   - **Bắt buộc phải xin ý kiến và nhận được sự đồng ý rõ ràng (explicit approval) từ người dùng trước khi thực hiện bất kỳ thay đổi nào liên quan đến biến môi trường hoặc tài khoản bí mật.**
+   - Khi phát hiện cấu hình môi trường, connection string hoặc secret key có vấn đề hoặc cần cập nhật, Agent **CHỈ ĐƯỢC PHÉP báo cáo hiện trạng, đề xuất phương án và chờ người dùng xác nhận**, tuyệt đối không tự ý can thiệp.
 ---
 ## 💬 NGUYÊN TẮC 5: QUY CHUẨN THÔNG BÁO LỖI TOÀN HỆ THỐNG (MANDATORY ERROR RULES)
 Tất cả các thông báo lỗi (Error Messages, Exceptions, ProblemDetails, Validation Errors, Response Details) **BẮT BUỘC** phải tuân theo 3 nguyên tắc sau:
