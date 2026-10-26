@@ -37,10 +37,3 @@ public class AppDbContext : DbContext, IAuctionDbContext
         modelBuilder.AddOutboxStateEntity();
     }
 }
-
-public class AuctionDbContext : AppDbContext
-{
-    public AuctionDbContext(DbContextOptions<AppDbContext> options) : base(options)
-    {
-    }
-}
