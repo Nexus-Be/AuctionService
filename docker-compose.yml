@@ -14,7 +14,7 @@ services:
     environment:
       POSTGRES_DB: auction_db
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-MatkhaucuaTui123@}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     ports:
       - "${AUCTION_DB_PORT:-5437}:5432"
     volumes:
@@ -39,11 +39,11 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
-      - ConnectionStrings__DefaultConnection=Host=auction-db;Port=5432;Database=auction_db;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-MatkhaucuaTui123@}
+      - ConnectionStrings__DefaultConnection=${CONNECTION_STRING:-Host=auction-db;Port=5432;Database=auction_db;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}}
       - RabbitMq__Host=${RABBITMQ_HOST:-rabbitmq}
       - RabbitMq__Port=${RABBITMQ_PORT:-5672}
       - RabbitMq__User=${RABBITMQ_USER:-guest}
-      - RabbitMq__Password=${RABBITMQ_PASSWORD:-MatkhaucuaTui123@}
+      - RabbitMq__Password=${RABBITMQ_PASSWORD:-guest}
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4317}
     depends_on:
       auction-db:
