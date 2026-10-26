@@ -1,33 +1,14 @@
 # =============================================================================
 # NEXUS AUCTION SERVICE - DOCKER COMPOSE
 # =============================================================================
-# Khởi chạy độc lập Auction Service kèm Cơ sở dữ liệu riêng:
+# Khởi chạy độc lập Auction Service:
+#   CSDL chính lưu trên Neon Cloud (PostgreSQL)
 #   docker compose up -d
 # =============================================================================
 
 services:
 
-  # 1. Cơ sở dữ liệu Auction Service (Port 5437)
-  auction-db:
-    image: postgres:16-alpine
-    container_name: nexus-auction-db
-    environment:
-      POSTGRES_DB: auction_db
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-    ports:
-      - "${AUCTION_DB_PORT:-5437}:5432"
-    volumes:
-      - auction_db_data:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d auction_db"]
-      interval: 1m
-      timeout: 30s
-      retries: 5
-      start_period: 60s
-
-  # 2. Ứng dụng Auction Service gRPC (Port 8005)
+  # 1. Ứng dụng Auction Service gRPC (Port 8005)
   auction-service:
     build:
       context: .
@@ -39,21 +20,14 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
-      - ConnectionStrings__DefaultConnection=${CONNECTION_STRING:-Host=auction-db;Port=5432;Database=auction_db;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}}
+      - ConnectionStrings__DefaultConnection=${CONNECTION_STRING}
       - RabbitMq__Host=${RABBITMQ_HOST:-rabbitmq}
       - RabbitMq__Port=${RABBITMQ_PORT:-5672}
       - RabbitMq__User=${RABBITMQ_USER:-guest}
       - RabbitMq__Password=${RABBITMQ_PASSWORD:-guest}
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4317}
-    depends_on:
-      auction-db:
-        condition: service_healthy
     restart: unless-stopped
 
 networks:
   default:
     name: nexus-network
-
-volumes:
-  auction_db_data:
-    name: nexus-be_auction_db_data
