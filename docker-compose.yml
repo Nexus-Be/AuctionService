@@ -20,7 +20,7 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
-      - ConnectionStrings__DefaultConnection=${CONNECTION_STRING}
+      - ConnectionStrings__DefaultConnection=${AUCTION_CONNECTION_STRING:-${CONNECTION_STRING}}
       - RabbitMq__Host=${RABBITMQ_HOST:-rabbitmq}
       - RabbitMq__Port=${RABBITMQ_PORT:-5672}
       - RabbitMq__User=${RABBITMQ_USER:-guest}
