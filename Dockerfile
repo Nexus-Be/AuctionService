@@ -5,12 +5,11 @@ ENV ASPNETCORE_URLS=http://+:8005
 
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
-COPY ["Auction.sln", "."]
 COPY ["Auction.Api/Auction.Api.csproj", "Auction.Api/"]
 COPY ["Auction.Application/Auction.Application.csproj", "Auction.Application/"]
 COPY ["Auction.Domain/Auction.Domain.csproj", "Auction.Domain/"]
 COPY ["Auction.Infrastructure/Auction.Infrastructure.csproj", "Auction.Infrastructure/"]
-RUN dotnet restore "Auction.sln"
+RUN dotnet restore "Auction.Api/Auction.Api.csproj"
 COPY . .
 RUN dotnet build "Auction.Api/Auction.Api.csproj" -c Release -o /app/build
 
