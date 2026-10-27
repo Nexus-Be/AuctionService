@@ -70,7 +70,10 @@ Khi bắt đầu làm việc tại AuctionService, AI Agent **BẮT BUỘC PHẢ
 1. **TUYỆT ĐỐI KHÔNG DÙNG REPOSITORY PATTERN BỌC NGOÀI EF CORE**: Sử dụng trực tiếp `AppDbContext` (hiện thực `IAuctionDbContext`) và `DbSet<T>` trong tầng Application. Cấm tạo `IAuctionRepository`, `IBidRepository`, `UnitOfWork`. (Đã kiểm chứng: `*Repository|UnitOfWork` = 0 kết quả.)
 2. **ĐẢM BẢO TÍNH TOÀN VẸN VÀ THỨ TỰ ĐẶT GIÁ**: Xử lý concurrency an toàn khi nhiều user cùng đặt giá. `RowVersion` đã khai báo trên `AuctionState` (`AuctionState.cs:17`, `IsConcurrencyToken()` tại `AuctionStateConfiguration.cs:14`) nhưng **chưa từng được kiểm tra** vì `SaveChangesAsync` có 0 lời gọi.
 3. **CẤU HÌNH PORT LÀ BẤT BIẾN, NHƯNG PHẢI NÓI ĐÚNG MÔI TRƯỜNG**: container `8005` (`Dockerfile:3-4`, `docker-compose.yml:37`); chạy local `5230`/`7202` (`Auction.Api/Properties/launchSettings.json:17,27`); DB `5437`.
-4. **HỢP ĐỒNG PROTOBUF DUY NHẤT — NHƯNG CHƯA TỒN TẠI TRONG REPO NÀY**: hiện **0 file `.proto`**, **0 package `Grpc.AspNetCore`**. Không được viết tài liệu/PR tham chiếu `Auction.Api/Services/AuctionGrpcService.cs` hay `Auction.Api/Contracts/shop.proto` như thể chúng đã có.
+4. **CẤM SỬ DỤNG gRPC CHO CÁC DỊCH VỤ ĐỒNG BỘ - BẮT BUỘC DÙNG 100% RESTFUL API**:
+   - Toàn bộ giao tiếp đồng bộ giữa API Gateway và AuctionService (hoặc giữa các microservices) bắt buộc phải sử dụng chuẩn **RESTful Web API** (JSON qua HTTP/1.1 hoặc HTTP/2).
+   - Tuyệt đối **CẤM** triển khai hoặc sử dụng gRPC Server/Client cho các dịch vụ đồng bộ trong toàn bộ hệ thống.
+   - Bề mặt API chính thức của AuctionService là REST `/api/v1/auction/*`. Cấm tạo hoặc sử dụng các file Protobuf (`.proto`).
 5. **KHÔNG ĐƯỢC COI `/health` LÀ BẰNG CHỨNG "SERVICE HOẠT ĐỘNG"**: endpoint trả `Healthy` vô điều kiện, không kiểm tra DB/RabbitMQ (`Program.cs:58`).
 6. **CẤM TỰ Ý SỬA ĐỔI BIẾN MÔI TRƯỜNG, SECRET VÀ KEY BÍ MẬT (MANDATORY HUMAN-IN-THE-LOOP FOR SECRETS)**:
    - **Tuyệt đối CẤM mọi AI Coding Agent tự ý sửa đổi, thay thế, xóa hoặc ghi đè các biến môi trường (`.env`, `.env.*`), Connection Strings, API Keys, JWT Secrets, chứng chỉ hoặc bất kỳ thông tin bí mật (credentials/secrets) nào trong toàn bộ hệ thống.**
