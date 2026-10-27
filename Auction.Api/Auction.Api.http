@@ -1,6 +1,9 @@
-@Auction.Api_HostAddress = http://localhost:5230
+@Host = http://localhost:8005
 
-GET {{Auction.Api_HostAddress}}/weatherforecast/
+### 1. Health Probe
+GET {{Host}}/health
 Accept: application/json
 
-###
+### 2. Swagger OpenAPI
+GET {{Host}}/swagger/v1/swagger.json
+Accept: application/json
