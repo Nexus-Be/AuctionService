@@ -53,3 +53,19 @@ Trạng thái từng tuyên bố của sơ đồ trên:
    - Index thật trong code: **1 index tường minh** — unique trên `ProductOpenAuctions.ProductId` (`Auction.Infrastructure/Persistence/Configurations/ProductOpenAuctionConfiguration.cs:12`). Các index còn lại trong migration (20 index) đều do EF sinh cho khóa ngoại/unique của outbox (`IX_Bids_AuctionId`, `IX_AuctionStates_AuctionId`...).
    - Không có index trên cột trạng thái/thời gian kết thúc ⇒ job quét phiên hết hạn (khi được viết) sẽ full-scan.
 3. **Thứ tự đăng ký DI (đúng như code)**: `AddApplicationServices()` (`Auction.Application/DependencyInjection.cs:9`) → `AddInfrastructureServices(configuration)` (`Auction.Infrastructure/DependencyInjection.cs:12`) → `AddEndpointsApiExplorer()`/`AddSwaggerGen()` (`Program.cs:23-24`). Không có `AddGrpc()`, `AddAuthentication()`, `AddOpenTelemetry()`.
+
+---
+
+## 4. QUY CHUẨN CẤU TRÚC CHUẨN HÓA (SERVICE BLUEPRINT)
+1. **Giao tiếp đồng bộ (RESTful)**:
+   - `Auction.Api/Controllers/`: Thin Dispatcher Controller, chỉ nhận request, gọi Service Interface trong Application, trả về `IActionResult`. Tuyệt đối cấm logic nghiệp vụ, cấm map anonymous object, cấm khai báo class DTO trong file controller.
+   - `Auction.Application/Services/{Feature}/`: Mỗi feature (`Auction`, `Bid`...) chứa `I{Feature}Service.cs`, `{Feature}Service.cs`, và Request/Response DTOs dùng chung cho Controller.
+2. **Giao tiếp bất đồng bộ (RabbitMQ MassTransit)**:
+   - `Auction.Application/Contracts/`: Chứa các Integration Events (ví dụ: `BidPlacedIntegrationEvent`, `AuctionEndedIntegrationEvent`).
+   - `Auction.Infrastructure/Consumers/`: Chứa các MassTransit Consumer xử lý sự kiện bất đồng bộ.
+3. **Quản lý Dependency Injection**:
+   - `Auction.Application/DependencyInjection.cs`: Đăng ký toàn bộ Application Services.
+   - `Auction.Infrastructure/DependencyInjection.cs`: Đăng ký `AppDbContext`, MassTransit Bus, Consumers.
+4. **Validation**:
+   - Input format validation đặt tại Request DTOs qua Data Annotations (`[Required]`, `[Range]`...).
+   - Business validation đặt tại Application Services hoặc Domain Exceptions.
