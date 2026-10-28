@@ -1,7 +1,7 @@
 # 01 — PHÂN TẦNG CLEAN ARCHITECTURE & QUY TẮC PHỤ THUỘC (AUCTION SERVICE)
-> **Trạng thái triển khai (2026-10-24):** ⚠️ Một phần — 4 tầng và luồng phụ thuộc ✅ đúng; nhưng Application **0/5 use case** (chỉ 3 hàm đọc), **0 MediatR**, **0 background service**, **0 domain method**; 1 index duy nhất trên 13 entity.
-> **Nguồn sự thật:** code trong repo này (`file:line` ghi kèm trong từng bảng).
-> **Cập nhật lần cuối:** 2026-10-24.
+> **Trạng thái triển khai (2026-10-29):** ✅ ĐÃ CHUẨN HÓA — 4 tầng Clean Architecture chuẩn hóa: Feature Co-location cho Auction và Bid tại `Auction.Application/Services/`, 1-to-1 REST Controllers tại `Auction.Api/Controllers/AuctionsController.cs` và `BidsController.cs`, Consumer DI extension `ConsumerExtensions.cs`, 100% RESTful HTTP/JSON (CẤM gRPC).
+> **Nguồn sự thật:** code trong repo này (`Auction.sln`, `Auction.Application/Services/`, `Auction.Application/Consumers/`, `Auction.Api/Controllers/`).
+> **Cập nhật lần cuối:** 2026-10-29.
 Solution `Auction.sln` (tên thật — không phải `AuctionService.sln`) bao gồm 4 project tương ứng với 4 tầng kiến trúc sạch (Clean Architecture):
 ```
 Auction.sln
