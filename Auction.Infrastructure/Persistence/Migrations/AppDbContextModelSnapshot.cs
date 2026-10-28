@@ -348,9 +348,8 @@ namespace Auction.Infrastructure.Persistence.Migrations
                     b.Property<DateTimeOffset?>("StartedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasColumnType("text");
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -376,7 +375,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
                             RowVersion = 1L,
                             ScheduledEndAt = new DateTimeOffset(new DateTime(2026, 1, 8, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
                             StartedAt = new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)),
-                            Status = "Running",
+                            Status = 2,
                             UpdatedAt = new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0))
                         });
                 });
@@ -402,8 +401,8 @@ namespace Auction.Infrastructure.Persistence.Migrations
                     b.Property<DateTimeOffset?>("DeletedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<string>("FromStatus")
-                        .HasColumnType("text");
+                    b.Property<int?>("FromStatus")
+                        .HasColumnType("integer");
 
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("boolean");
@@ -412,9 +411,8 @@ namespace Auction.Infrastructure.Persistence.Migrations
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
 
-                    b.Property<string>("ToStatus")
-                        .IsRequired()
-                        .HasColumnType("text");
+                    b.Property<int>("ToStatus")
+                        .HasColumnType("integer");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -432,9 +430,8 @@ namespace Auction.Infrastructure.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<string>("Action")
-                        .IsRequired()
-                        .HasColumnType("text");
+                    b.Property<int>("Action")
+                        .HasColumnType("integer");
 
                     b.Property<string>("ChangedColumns")
                         .HasColumnType("jsonb");
@@ -626,9 +623,8 @@ namespace Auction.Infrastructure.Persistence.Migrations
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("boolean");
 
-                    b.Property<string>("Reason")
-                        .IsRequired()
-                        .HasColumnType("text");
+                    b.Property<int>("Reason")
+                        .HasColumnType("integer");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -675,9 +671,8 @@ namespace Auction.Infrastructure.Persistence.Migrations
                     b.Property<int?>("ResponseStatus")
                         .HasColumnType("integer");
 
-                    b.Property<string>("Scope")
-                        .IsRequired()
-                        .HasColumnType("text");
+                    b.Property<int>("Scope")
+                        .HasColumnType("integer");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");

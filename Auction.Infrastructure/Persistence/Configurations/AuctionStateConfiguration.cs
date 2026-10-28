@@ -9,7 +9,6 @@ public class AuctionStateConfiguration : IEntityTypeConfiguration<AuctionState>
     public void Configure(EntityTypeBuilder<AuctionState> builder)
     {
         builder.HasKey(x => x.Id);
-        builder.Property(x => x.Status).HasConversion<string>();
         builder.Property(x => x.CurrentPriceAmount).HasPrecision(18, 2);
         builder.Property(x => x.RowVersion).IsConcurrencyToken();
 

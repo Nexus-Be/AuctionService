@@ -13,7 +13,6 @@ public class AuditLogConfiguration : IEntityTypeConfiguration<AuditLog>
         builder.Property(x => x.TraceId).HasMaxLength(100);
         builder.Property(x => x.UserId).HasMaxLength(100);
         builder.Property(x => x.UserName).HasMaxLength(255);
-        builder.Property(x => x.Action).HasConversion<string>();
         builder.Property(x => x.EntityName).HasMaxLength(150).IsRequired();
         builder.Property(x => x.EntityId).HasMaxLength(150).IsRequired();
         builder.Property(x => x.OldValues).HasColumnType("jsonb");

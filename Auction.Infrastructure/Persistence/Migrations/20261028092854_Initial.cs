@@ -7,7 +7,7 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace Auction.Infrastructure.Persistence.Migrations
 {
     /// <inheritdoc />
-    public partial class InitialAuctionSchema : Migration
+    public partial class Initial : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
@@ -77,7 +77,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
                     TraceId = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
                     UserId = table.Column<string>(type: "character varying(100)", maxLength: 100, nullable: true),
                     UserName = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: true),
-                    Action = table.Column<string>(type: "text", nullable: false),
+                    Action = table.Column<int>(type: "integer", nullable: false),
                     EntityName = table.Column<string>(type: "character varying(150)", maxLength: 150, nullable: false),
                     EntityId = table.Column<string>(type: "character varying(150)", maxLength: 150, nullable: false),
                     OldValues = table.Column<string>(type: "jsonb", nullable: true),
@@ -99,7 +99,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
                     Key = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
-                    Scope = table.Column<string>(type: "text", nullable: false),
+                    Scope = table.Column<int>(type: "integer", nullable: false),
                     RequestHash = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: false),
                     ResponseStatus = table.Column<int>(type: "integer", nullable: true),
                     ResponseBody = table.Column<string>(type: "jsonb", nullable: true),
@@ -184,7 +184,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
                     AuctionId = table.Column<Guid>(type: "uuid", nullable: false),
-                    Status = table.Column<string>(type: "text", nullable: false),
+                    Status = table.Column<int>(type: "integer", nullable: false),
                     CurrentPriceAmount = table.Column<decimal>(type: "numeric(18,2)", precision: 18, scale: 2, nullable: true),
                     CurrentWinnerId = table.Column<Guid>(type: "uuid", nullable: true),
                     BidCount = table.Column<int>(type: "integer", nullable: false),
@@ -215,8 +215,8 @@ namespace Auction.Infrastructure.Persistence.Migrations
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
                     AuctionId = table.Column<Guid>(type: "uuid", nullable: false),
-                    FromStatus = table.Column<string>(type: "text", nullable: true),
-                    ToStatus = table.Column<string>(type: "text", nullable: false),
+                    FromStatus = table.Column<int>(type: "integer", nullable: true),
+                    ToStatus = table.Column<int>(type: "integer", nullable: false),
                     Reason = table.Column<string>(type: "character varying(1000)", maxLength: 1000, nullable: true),
                     ChangedBy = table.Column<Guid>(type: "uuid", nullable: true),
                     ChangedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
@@ -433,7 +433,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
                 {
                     Id = table.Column<Guid>(type: "uuid", nullable: false),
                     BidId = table.Column<Guid>(type: "uuid", nullable: false),
-                    Reason = table.Column<string>(type: "text", nullable: false),
+                    Reason = table.Column<int>(type: "integer", nullable: false),
                     InvalidatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
                     CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
                     UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
@@ -464,7 +464,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
             migrationBuilder.InsertData(
                 table: "AuctionStates",
                 columns: new[] { "Id", "AuctionId", "BidCount", "CreatedAt", "CurrentPriceAmount", "CurrentWinnerId", "DeletedAt", "EndedAt", "ExtensionCount", "IsDeleted", "RowVersion", "ScheduledEndAt", "StartedAt", "Status", "UpdatedAt" },
-                values: new object[] { new Guid("aa100000-0000-0000-0000-000000000001"), new Guid("aa000000-0000-0000-0000-000000000001"), 1, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), 600000m, new Guid("dddddddd-4444-4444-4444-444444444444"), null, null, 0, false, 1L, new DateTimeOffset(new DateTime(2026, 1, 8, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), "Running", new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) });
+                values: new object[] { new Guid("aa100000-0000-0000-0000-000000000001"), new Guid("aa000000-0000-0000-0000-000000000001"), 1, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), 600000m, new Guid("dddddddd-4444-4444-4444-444444444444"), null, null, 0, false, 1L, new DateTimeOffset(new DateTime(2026, 1, 8, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), 2, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) });
 
             migrationBuilder.InsertData(
                 table: "Bids",

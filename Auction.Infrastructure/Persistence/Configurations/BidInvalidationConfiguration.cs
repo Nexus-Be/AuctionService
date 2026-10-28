@@ -9,7 +9,6 @@ public class BidInvalidationConfiguration : IEntityTypeConfiguration<BidInvalida
     public void Configure(EntityTypeBuilder<BidInvalidation> builder)
     {
         builder.HasKey(x => x.Id);
-        builder.Property(x => x.Reason).HasConversion<string>();
 
         builder.HasOne(i => i.Bid)
             .WithOne(b => b.BidInvalidation)
