@@ -21,13 +21,10 @@ services:
     environment:
       - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
       - ConnectionStrings__DefaultConnection=${AUCTION_CONNECTION_STRING:-${CONNECTION_STRING}}
-      - RabbitMq__Host=${RABBITMQ_HOST:-rabbitmq}
-      - RabbitMq__Port=${RABBITMQ_PORT:-5672}
-      - RabbitMq__User=${RABBITMQ_USER:-guest}
-      - RabbitMq__Password=${RABBITMQ_PASSWORD:-guest}
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4317}
     restart: unless-stopped
 
 networks:
   default:
     name: nexus-network
+    external: true

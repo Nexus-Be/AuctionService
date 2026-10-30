@@ -1,6 +1,5 @@
 namespace Auction.Infrastructure.Persistence;
 
-using MassTransit;
 using Microsoft.EntityFrameworkCore;
 using Auction.Application.Interfaces;
 using Auction.Domain.Entities;
@@ -30,10 +29,5 @@ public class AppDbContext : DbContext, IAuctionDbContext
         base.OnModelCreating(modelBuilder);
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(AppDbContext).Assembly);
         Seeds.AuctionSeedData.SeedAll(modelBuilder);
-
-        // MassTransit Transactional Outbox entities
-        modelBuilder.AddInboxStateEntity();
-        modelBuilder.AddOutboxMessageEntity();
-        modelBuilder.AddOutboxStateEntity();
     }
 }

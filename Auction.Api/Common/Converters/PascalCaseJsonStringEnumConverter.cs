@@ -59,7 +59,17 @@ public sealed class PascalCaseJsonStringEnumConverter : JsonConverterFactory
                     throw new JsonException($"Enum value for '{typeof(T).Name}' cannot be empty. Valid values are: {string.Join(", ", Enum.GetNames<T>())}.");
                 }
 
-                if (Enum.TryParse<T>(stringValue, ignoreCase: true, out var result))
+                if (!_allowIntegerValues && long.TryParse(stringValue, out _))
+                {
+                    throw new JsonException($"Invalid value '{stringValue}' for enum '{typeof(T).Name}'. Valid values are: {string.Join(", ", Enum.GetNames<T>())}.");
+                }
+
+                if (stringValue.Contains(',') && !typeof(T).IsDefined(typeof(FlagsAttribute), false))
+                {
+                    throw new JsonException($"Invalid value '{stringValue}' for enum '{typeof(T).Name}'. Valid values are: {string.Join(", ", Enum.GetNames<T>())}.");
+                }
+
+                if (Enum.TryParse<T>(stringValue, ignoreCase: true, out var result) && Enum.IsDefined(typeof(T), result))
                 {
                     return result;
                 }

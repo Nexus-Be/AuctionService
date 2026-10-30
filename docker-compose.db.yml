@@ -1,0 +1,27 @@
+services:
+  postgres-auction:
+    image: postgres:16-alpine
+    container_name: nexus-postgres-auction
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: auction_db
+    ports:
+      - "${AUCTION_DB_PORT:-5437}:5432"
+    volumes:
+      - postgres_auction_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d auction_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_auction_data:
+    name: nexus-local_postgres_auction_data
+
+networks:
+  default:
+    name: nexus-network
+    external: true

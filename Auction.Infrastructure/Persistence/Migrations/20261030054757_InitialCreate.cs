@@ -1,13 +1,14 @@
 ﻿using System;
 using Microsoft.EntityFrameworkCore.Migrations;
-using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
 #nullable disable
+
+#pragma warning disable CA1814 // Prefer jagged arrays over multidimensional
 
 namespace Auction.Infrastructure.Persistence.Migrations
 {
     /// <inheritdoc />
-    public partial class Initial : Migration
+    public partial class InitialCreate : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
@@ -112,45 +113,6 @@ namespace Auction.Infrastructure.Persistence.Migrations
                 constraints: table =>
                 {
                     table.PrimaryKey("PK_IdempotencyKeys", x => x.Id);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "InboxState",
-                columns: table => new
-                {
-                    Id = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
-                    MessageId = table.Column<Guid>(type: "uuid", nullable: false),
-                    ConsumerId = table.Column<Guid>(type: "uuid", nullable: false),
-                    LockId = table.Column<Guid>(type: "uuid", nullable: false),
-                    RowVersion = table.Column<byte[]>(type: "bytea", rowVersion: true, nullable: true),
-                    Received = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
-                    ReceiveCount = table.Column<int>(type: "integer", nullable: false),
-                    ExpirationTime = table.Column<DateTime>(type: "timestamp with time zone", nullable: true),
-                    Consumed = table.Column<DateTime>(type: "timestamp with time zone", nullable: true),
-                    Delivered = table.Column<DateTime>(type: "timestamp with time zone", nullable: true),
-                    LastSequenceNumber = table.Column<long>(type: "bigint", nullable: true)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_InboxState", x => x.Id);
-                    table.UniqueConstraint("AK_InboxState_MessageId_ConsumerId", x => new { x.MessageId, x.ConsumerId });
-                });
-
-            migrationBuilder.CreateTable(
-                name: "OutboxState",
-                columns: table => new
-                {
-                    OutboxId = table.Column<Guid>(type: "uuid", nullable: false),
-                    LockId = table.Column<Guid>(type: "uuid", nullable: false),
-                    RowVersion = table.Column<byte[]>(type: "bytea", rowVersion: true, nullable: true),
-                    Created = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
-                    Delivered = table.Column<DateTime>(type: "timestamp with time zone", nullable: true),
-                    LastSequenceNumber = table.Column<long>(type: "bigint", nullable: true)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_OutboxState", x => x.OutboxId);
                 });
 
             migrationBuilder.CreateTable(
@@ -286,48 +248,6 @@ namespace Auction.Infrastructure.Persistence.Migrations
                 });
 
             migrationBuilder.CreateTable(
-                name: "OutboxMessage",
-                columns: table => new
-                {
-                    SequenceNumber = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
-                    EnqueueTime = table.Column<DateTime>(type: "timestamp with time zone", nullable: true),
-                    SentTime = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
-                    Headers = table.Column<string>(type: "text", nullable: true),
-                    Properties = table.Column<string>(type: "text", nullable: true),
-                    InboxMessageId = table.Column<Guid>(type: "uuid", nullable: true),
-                    InboxConsumerId = table.Column<Guid>(type: "uuid", nullable: true),
-                    OutboxId = table.Column<Guid>(type: "uuid", nullable: true),
-                    MessageId = table.Column<Guid>(type: "uuid", nullable: false),
-                    ContentType = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: false),
-                    MessageType = table.Column<string>(type: "text", nullable: false),
-                    Body = table.Column<string>(type: "text", nullable: false),
-                    ConversationId = table.Column<Guid>(type: "uuid", nullable: true),
-                    CorrelationId = table.Column<Guid>(type: "uuid", nullable: true),
-                    InitiatorId = table.Column<Guid>(type: "uuid", nullable: true),
-                    RequestId = table.Column<Guid>(type: "uuid", nullable: true),
-                    SourceAddress = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: true),
-                    DestinationAddress = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: true),
-                    ResponseAddress = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: true),
-                    FaultAddress = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: true),
-                    ExpirationTime = table.Column<DateTime>(type: "timestamp with time zone", nullable: true)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_OutboxMessage", x => x.SequenceNumber);
-                    table.ForeignKey(
-                        name: "FK_OutboxMessage_InboxState_InboxMessageId_InboxConsumerId",
-                        columns: x => new { x.InboxMessageId, x.InboxConsumerId },
-                        principalTable: "InboxState",
-                        principalColumns: new[] { "MessageId", "ConsumerId" });
-                    table.ForeignKey(
-                        name: "FK_OutboxMessage_OutboxState_OutboxId",
-                        column: x => x.OutboxId,
-                        principalTable: "OutboxState",
-                        principalColumn: "OutboxId");
-                });
-
-            migrationBuilder.CreateTable(
                 name: "AuctionExtensions",
                 columns: table => new
                 {
@@ -459,22 +379,68 @@ namespace Auction.Infrastructure.Persistence.Migrations
             migrationBuilder.InsertData(
                 table: "Auctions",
                 columns: new[] { "Id", "AntiSnipingExtensionMinutes", "BidStepAmount", "CreatedAt", "CreatedBy", "DeletedAt", "IsDeleted", "MaxExtensionCount", "MinReputationToBid", "MinReputationToSell", "OriginalEndAt", "ProductId", "RecreatedFromAuctionId", "ScheduledStartAt", "SellerId", "SkuId", "SnapshotProductTitle", "StartPriceAmount", "UpdatedAt", "UpdatedBy" },
-                values: new object[] { new Guid("aa000000-0000-0000-0000-000000000001"), 5, 50000m, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("cccccccc-3333-3333-3333-333333333333"), null, false, 10, 40, 50, new DateTimeOffset(new DateTime(2026, 1, 8, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("44000000-0000-0000-0000-000000000004"), null, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("cccccccc-3333-3333-3333-333333333333"), new Guid("44100000-0000-0000-0000-000000000004"), "Mũ Bảo Hiểm Xe Đạp Nexus Aero - Đỏ / Size M", 500000m, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("00000000-0000-0000-0000-000000000000") });
+                values: new object[,]
+                {
+                    { new Guid("aa000000-0000-0000-0000-000000000001"), 5, 50000m, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("cccccccc-3333-3333-3333-333333333333"), null, false, 10, 40, 50, new DateTimeOffset(new DateTime(2026, 1, 8, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("44000000-0000-0000-0000-000000000004"), null, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("cccccccc-3333-3333-3333-333333333333"), new Guid("44100000-0000-0000-0000-000000000004"), "Mũ Bảo Hiểm Xe Đạp Nexus Aero - Đỏ / Size M", 500000m, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("00000000-0000-0000-0000-000000000000") },
+                    { new Guid("aa000000-0000-0000-0000-000000000002"), 5, 50000m, new DateTimeOffset(new DateTime(2025, 12, 22, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("cccccccc-3333-3333-3333-333333333333"), null, false, 10, 40, 50, new DateTimeOffset(new DateTime(2025, 12, 29, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("44000000-0000-0000-0000-000000000004"), null, new DateTimeOffset(new DateTime(2025, 12, 22, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("cccccccc-3333-3333-3333-333333333333"), new Guid("44100000-0000-0000-0000-000000000004"), "Mũ Bảo Hiểm Xe Đạp Nexus Aero - Đỏ / Size M (Đợt 1)", 450000m, new DateTimeOffset(new DateTime(2025, 12, 29, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("00000000-0000-0000-0000-000000000000") }
+                });
+
+            migrationBuilder.InsertData(
+                table: "AuditLogs",
+                columns: new[] { "Id", "Action", "ChangedColumns", "CreatedAt", "EntityId", "EntityName", "IpAddress", "IsSynced", "NewValues", "OldValues", "ServiceName", "TraceId", "UserAgent", "UserId", "UserName" },
+                values: new object[] { new Guid("aa800000-0000-0000-0000-000000000001"), 0, "[\"StartPriceAmount\",\"BidStepAmount\"]", new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), "aa000000-0000-0000-0000-000000000001", "Auction", "127.0.0.1", true, "{\"StartPriceAmount\":500000,\"BidStepAmount\":50000}", null, "Auction", "trace-auction-create-001", "NexusClient/1.0", "cccccccc-3333-3333-3333-333333333333", "seller@nexus.com" });
+
+            migrationBuilder.InsertData(
+                table: "AuctionSettlements",
+                columns: new[] { "Id", "AuctionId", "CreatedAt", "DeletedAt", "IsDeleted", "OrderId", "PaidAt", "PaymentDeadlineAt", "UpdatedAt" },
+                values: new object[] { new Guid("aa700000-0000-0000-0000-000000000001"), new Guid("aa000000-0000-0000-0000-000000000002"), new DateTimeOffset(new DateTime(2025, 12, 29, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), null, false, new Guid("01000000-0000-0000-0000-000000000001"), new DateTimeOffset(new DateTime(2025, 12, 30, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new DateTimeOffset(new DateTime(2025, 12, 31, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new DateTimeOffset(new DateTime(2025, 12, 30, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) });
 
             migrationBuilder.InsertData(
                 table: "AuctionStates",
                 columns: new[] { "Id", "AuctionId", "BidCount", "CreatedAt", "CurrentPriceAmount", "CurrentWinnerId", "DeletedAt", "EndedAt", "ExtensionCount", "IsDeleted", "RowVersion", "ScheduledEndAt", "StartedAt", "Status", "UpdatedAt" },
-                values: new object[] { new Guid("aa100000-0000-0000-0000-000000000001"), new Guid("aa000000-0000-0000-0000-000000000001"), 1, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), 600000m, new Guid("dddddddd-4444-4444-4444-444444444444"), null, null, 0, false, 1L, new DateTimeOffset(new DateTime(2026, 1, 8, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), 2, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) });
+                values: new object[,]
+                {
+                    { new Guid("aa100000-0000-0000-0000-000000000001"), new Guid("aa000000-0000-0000-0000-000000000001"), 1, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), 600000m, new Guid("dddddddd-4444-4444-4444-444444444444"), null, null, 0, false, 1L, new DateTimeOffset(new DateTime(2026, 1, 8, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), 2, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) },
+                    { new Guid("aa100000-0000-0000-0000-000000000002"), new Guid("aa000000-0000-0000-0000-000000000002"), 1, new DateTimeOffset(new DateTime(2025, 12, 22, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), 550000m, new Guid("dddddddd-4444-4444-4444-444444444444"), null, null, 0, false, 1L, new DateTimeOffset(new DateTime(2025, 12, 29, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new DateTimeOffset(new DateTime(2025, 12, 22, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), 4, new DateTimeOffset(new DateTime(2025, 12, 29, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) }
+                });
+
+            migrationBuilder.InsertData(
+                table: "AuctionStatusHistories",
+                columns: new[] { "Id", "AuctionId", "ChangedAt", "ChangedBy", "CreatedAt", "DeletedAt", "FromStatus", "IsDeleted", "Reason", "ToStatus", "UpdatedAt" },
+                values: new object[,]
+                {
+                    { new Guid("aa500000-0000-0000-0000-000000000001"), new Guid("aa000000-0000-0000-0000-000000000001"), new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("cccccccc-3333-3333-3333-333333333333"), new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), null, 1, false, "Phiên đấu giá bắt đầu tự động theo lịch", 2, new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) },
+                    { new Guid("aa500000-0000-0000-0000-000000000002"), new Guid("aa000000-0000-0000-0000-000000000002"), new DateTimeOffset(new DateTime(2025, 12, 29, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("cccccccc-3333-3333-3333-333333333333"), new DateTimeOffset(new DateTime(2025, 12, 29, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), null, 2, false, "Hết thời gian đấu giá", 3, new DateTimeOffset(new DateTime(2025, 12, 29, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) },
+                    { new Guid("aa500000-0000-0000-0000-000000000003"), new Guid("aa000000-0000-0000-0000-000000000002"), new DateTimeOffset(new DateTime(2025, 12, 30, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("dddddddd-4444-4444-4444-444444444444"), new DateTimeOffset(new DateTime(2025, 12, 30, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), null, 3, false, "Người thắng đã hoàn tất thanh toán", 4, new DateTimeOffset(new DateTime(2025, 12, 30, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) }
+                });
 
             migrationBuilder.InsertData(
                 table: "Bids",
                 columns: new[] { "Id", "Amount", "AuctionId", "BidSeq", "BidderId", "CreatedAt", "DeletedAt", "IsDeleted", "PlacedAt", "UpdatedAt" },
-                values: new object[] { new Guid("aa300000-0000-0000-0000-000000000001"), 600000m, new Guid("aa000000-0000-0000-0000-000000000001"), 1, new Guid("dddddddd-4444-4444-4444-444444444444"), new DateTimeOffset(new DateTime(2026, 1, 1, 2, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), null, false, new DateTimeOffset(new DateTime(2026, 1, 1, 2, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new DateTimeOffset(new DateTime(2026, 1, 1, 2, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) });
+                values: new object[,]
+                {
+                    { new Guid("aa300000-0000-0000-0000-000000000001"), 600000m, new Guid("aa000000-0000-0000-0000-000000000001"), 1, new Guid("dddddddd-4444-4444-4444-444444444444"), new DateTimeOffset(new DateTime(2026, 1, 1, 2, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), null, false, new DateTimeOffset(new DateTime(2026, 1, 1, 2, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new DateTimeOffset(new DateTime(2026, 1, 1, 2, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) },
+                    { new Guid("aa300000-0000-0000-0000-000000000002"), 550000m, new Guid("aa000000-0000-0000-0000-000000000002"), 1, new Guid("dddddddd-4444-4444-4444-444444444444"), new DateTimeOffset(new DateTime(2025, 12, 27, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), null, false, new DateTimeOffset(new DateTime(2025, 12, 27, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new DateTimeOffset(new DateTime(2025, 12, 27, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) }
+                });
 
             migrationBuilder.InsertData(
                 table: "ProductOpenAuctions",
                 columns: new[] { "Id", "AuctionId", "CreatedAt", "DeletedAt", "IsDeleted", "ProductId", "UpdatedAt" },
                 values: new object[] { new Guid("aa200000-0000-0000-0000-000000000001"), new Guid("aa000000-0000-0000-0000-000000000001"), new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), null, false, new Guid("44000000-0000-0000-0000-000000000004"), new DateTimeOffset(new DateTime(2026, 1, 1, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) });
+
+            migrationBuilder.InsertData(
+                table: "AuctionResults",
+                columns: new[] { "Id", "AuctionId", "CreatedAt", "DeletedAt", "DeterminedAt", "FinalPriceAmount", "IsDeleted", "UpdatedAt", "WinnerId", "WinningBidId" },
+                values: new object[] { new Guid("aa600000-0000-0000-0000-000000000001"), new Guid("aa000000-0000-0000-0000-000000000002"), new DateTimeOffset(new DateTime(2025, 12, 29, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), null, new DateTimeOffset(new DateTime(2025, 12, 29, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), 550000m, false, new DateTimeOffset(new DateTime(2025, 12, 29, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), new Guid("dddddddd-4444-4444-4444-444444444444"), new Guid("aa300000-0000-0000-0000-000000000002") });
+
+            migrationBuilder.InsertData(
+                table: "BidHistories",
+                columns: new[] { "Id", "Amount", "AuctionId", "BidId", "BidderId", "CreatedAt", "DeletedAt", "DisplayName", "IsDeleted", "IsInvalidated", "IsOutbid", "IsWinning", "PlacedAt", "SequenceNo", "UpdatedAt" },
+                values: new object[,]
+                {
+                    { new Guid("aa400000-0000-0000-0000-000000000001"), 600000m, new Guid("aa000000-0000-0000-0000-000000000001"), new Guid("aa300000-0000-0000-0000-000000000001"), new Guid("dddddddd-4444-4444-4444-444444444444"), new DateTimeOffset(new DateTime(2026, 1, 1, 2, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), null, "Nguyen Van Buyer", false, false, false, true, new DateTimeOffset(new DateTime(2026, 1, 1, 2, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), 1, new DateTimeOffset(new DateTime(2026, 1, 1, 2, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) },
+                    { new Guid("aa400000-0000-0000-0000-000000000002"), 550000m, new Guid("aa000000-0000-0000-0000-000000000002"), new Guid("aa300000-0000-0000-0000-000000000002"), new Guid("dddddddd-4444-4444-4444-444444444444"), new DateTimeOffset(new DateTime(2025, 12, 27, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), null, "Nguyen Van Buyer", false, false, false, true, new DateTimeOffset(new DateTime(2025, 12, 27, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)), 1, new DateTimeOffset(new DateTime(2025, 12, 27, 0, 0, 0, 0, DateTimeKind.Unspecified), new TimeSpan(0, 0, 0, 0, 0)) }
+                });
 
             migrationBuilder.CreateIndex(
                 name: "IX_AuctionExtensions_AuctionId",
@@ -541,38 +507,6 @@ namespace Auction.Infrastructure.Persistence.Migrations
                 column: "AuctionId");
 
             migrationBuilder.CreateIndex(
-                name: "IX_InboxState_Delivered",
-                table: "InboxState",
-                column: "Delivered");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_OutboxMessage_EnqueueTime",
-                table: "OutboxMessage",
-                column: "EnqueueTime");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_OutboxMessage_ExpirationTime",
-                table: "OutboxMessage",
-                column: "ExpirationTime");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_OutboxMessage_InboxMessageId_InboxConsumerId_SequenceNumber",
-                table: "OutboxMessage",
-                columns: new[] { "InboxMessageId", "InboxConsumerId", "SequenceNumber" },
-                unique: true);
-
-            migrationBuilder.CreateIndex(
-                name: "IX_OutboxMessage_OutboxId_SequenceNumber",
-                table: "OutboxMessage",
-                columns: new[] { "OutboxId", "SequenceNumber" },
-                unique: true);
-
-            migrationBuilder.CreateIndex(
-                name: "IX_OutboxState_Created",
-                table: "OutboxState",
-                column: "Created");
-
-            migrationBuilder.CreateIndex(
                 name: "IX_ProductOpenAuctions_AuctionId",
                 table: "ProductOpenAuctions",
                 column: "AuctionId",
@@ -619,19 +553,10 @@ namespace Auction.Infrastructure.Persistence.Migrations
                 name: "IdempotencyKeys");
 
             migrationBuilder.DropTable(
-                name: "OutboxMessage");
-
-            migrationBuilder.DropTable(
                 name: "ProductOpenAuctions");
 
             migrationBuilder.DropTable(
                 name: "Bids");
-
-            migrationBuilder.DropTable(
-                name: "InboxState");
-
-            migrationBuilder.DropTable(
-                name: "OutboxState");
 
             migrationBuilder.DropTable(
                 name: "Auctions");

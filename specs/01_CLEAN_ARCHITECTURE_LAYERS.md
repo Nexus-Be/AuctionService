@@ -60,12 +60,12 @@ Trạng thái từng tuyên bố của sơ đồ trên:
 1. **Giao tiếp đồng bộ (RESTful)**:
    - `Auction.Api/Controllers/`: Thin Dispatcher Controller, chỉ nhận request, gọi Service Interface trong Application, trả về `IActionResult`. Tuyệt đối cấm logic nghiệp vụ, cấm map anonymous object, cấm khai báo class DTO trong file controller.
    - `Auction.Application/Services/{Feature}/`: Mỗi feature (`Auction`, `Bid`...) chứa `I{Feature}Service.cs`, `{Feature}Service.cs`, và Request/Response DTOs dùng chung cho Controller.
-2. **Giao tiếp bất đồng bộ (RabbitMQ MassTransit)**:
-   - `Auction.Application/Contracts/`: Chứa các Integration Events (ví dụ: `BidPlacedIntegrationEvent`, `AuctionEndedIntegrationEvent`).
-   - `Auction.Infrastructure/Consumers/`: Chứa các MassTransit Consumer xử lý sự kiện bất đồng bộ.
+2. **Bãi bỏ hoàn toàn gRPC & Message Broker**:
+   - Không sử dụng RabbitMQ, MassTransit, Saga state machine hay Outbox tables.
+   - Toàn bộ giao tiếp được thực hiện 100% qua RESTful Web API (`AuctionsController.cs`, `BidsController.cs`).
 3. **Quản lý Dependency Injection**:
    - `Auction.Application/DependencyInjection.cs`: Đăng ký toàn bộ Application Services.
-   - `Auction.Infrastructure/DependencyInjection.cs`: Đăng ký `AppDbContext`, MassTransit Bus, Consumers.
+   - `Auction.Infrastructure/DependencyInjection.cs`: Đăng ký `AppDbContext` (hiện thực `IAuctionDbContext`).
 4. **Validation**:
    - Input format validation đặt tại Request DTOs qua Data Annotations (`[Required]`, `[Range]`...).
    - Business validation đặt tại Application Services hoặc Domain Exceptions.

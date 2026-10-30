@@ -14,8 +14,7 @@ public static class ObservabilityExtensions
             .WithTracing(t =>
             {
                 t.AddAspNetCoreInstrumentation()
-                 .AddHttpClientInstrumentation()
-                 .AddSource("MassTransit");
+                 .AddHttpClientInstrumentation();
 
                 if (!string.IsNullOrEmpty(otlpEndpoint))
                 {
