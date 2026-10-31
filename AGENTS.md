@@ -25,6 +25,12 @@ This project is indexed by GitNexus as **AuctionService** (445 symbols, 565 rela
 
 ---
 
+## Endpoint Workflow
+
+Before adding or changing any REST endpoint, follow the local checklist at `.agents/skills/new-feature-endpoint/SKILL.md`. It covers contract, persistence, Application, Api, tests, documentation handoff, and verification. This repository is Inward-Only, so the checklist is self-contained.
+
+---
+
 ## 🛑 NGUYÊN TẮC 1: BẮT BUỘC LẬP KẾ HOẠCH TRƯỚC KHI HÀNH ĐỘNG (PLAN-FIRST RULE)
 
 Mọi AI Agent khi nhận nhiệm vụ kỹ thuật tại AuctionService **BẮT BUỘC PHẢI LẬP VÀ TRÌNH BÀY PLAN** trước khi thực hiện bất kỳ hành động sửa đổi mã nguồn, thêm/xóa file, refactor, tạo migration database hay thay đổi cấu hình nào.
@@ -73,9 +79,9 @@ Khi bắt đầu làm việc tại AuctionService, AI Agent **BẮT BUỘC PHẢ
    - Toàn bộ thao tác phân trang phiên đấu giá, lịch sử đặt giá bắt buộc thực hiện trực tiếp tại Database qua `.Skip((page - 1) * pageSize).Take(pageSize)` và `.CountAsync()`.
    - Đóng gói dữ liệu trả về theo cấu trúc phân trang chuẩn `PagedData<T>` (`items` và metadata `pagination: { pageIndex, pageSize, totalCount, totalPages, hasPreviousPage, hasNextPage }`).
    - TUYỆT ĐỐI CẤM trả về danh sách thô lớn không giới hạn để Gateway tự phân trang.
-6. **QUY CHUẨN PHÂN TÁCH PUBLIC VÀ INTERNAL REST API (INTERNAL API SEGREGATION)**:
-   - Cấu trúc thư mục Controller tại `Auction.Api/Controllers/` bắt buộc chia thành `Controllers/Public/` (`/api/v1/auctions`, `/api/v1/auctions/{id}/bids`) và `Controllers/Internal/` (nếu có endpoint liên service như tự động chốt phiên).
-   - Tầng Api kích hoạt `InternalServiceAuthMiddleware` chặn mọi request `/api/v1/internal/*` không có header `X-Internal-Service-Key` hợp lệ.
+6. **INTERNAL API ĐANG TẠM KHÓA (2026-10-31)**:
+   - Route liên service dùng đường dẫn công khai, không còn `/api/v1/internal`.
+   - `InternalServiceAuthMiddleware` và `InternalServiceAuthHandler` đã comment đăng ký; không yêu cầu `X-Internal-Service-Key`.
 7. **QUY CHUẨN BẢO VỆ QUYỀN SỞ HỮU TÀI NGUYÊN (RESOURCE OWNERSHIP GOVERNANCE)**:
    - Thao tác đặt giá (`Bid`) bắt buộc trích xuất `BidderId` từ `HttpContext.GetUserId()`. Tuyệt đối cấm đặt giá thay người khác.
    - Thao tác hủy hoặc cập nhật phiên đấu giá chỉ người bán sở hữu phiên đó mới được thực hiện; can thiệp của hệ thống bắt buộc kiểm tra quyền `admin` hoặc `staff`.

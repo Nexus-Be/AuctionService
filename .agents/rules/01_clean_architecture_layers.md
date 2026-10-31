@@ -9,7 +9,7 @@
 * `Auction.Domain`: Entities (`AuctionSession`, `Bid`, `AuctionWinner`), Enums (`AuctionStatus`), Exceptions (`AuctionDomainException`).
 * `Auction.Application`: Use cases in `Services/{Feature}/`, interface `IAuctionDbContext`, request/response records.
 * `Auction.Infrastructure`: `AppDbContext`, EF Core configurations, migrations.
-* `Auction.Api`: Thin controllers in `Controllers/Public/` and `Controllers/Internal/`, middlewares, extensions, composition root (`Program.cs`).
+* `Auction.Api`: Thin controllers in `Controllers/Public/`, middlewares, extensions, composition root (`Program.cs`).
 
 ## 3. Feature Co-Location (Mandatory)
 * `Services/Auction/`: `IAuctionService.cs`, `AuctionService.cs`, `AuctionRequests.cs`, `AuctionResponses.cs`.

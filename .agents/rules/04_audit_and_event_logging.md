@@ -11,6 +11,6 @@ Record immutable audit logs for critical operations:
 * Audit rows are written into this service's own `AuditLogs` table through `_dbContext.AddAuditLog(...)` (`Auction.Application/Common/Extensions/AuditLogExtensions.cs`).
 * The audit row is committed in the same database transaction as the business change.
 * Never instantiate `new AuditLog { ... }` outside the extension. Never replace an audit row with `_logger.LogInformation`.
-* Never call `LogService` over HTTP inside the business transaction. Rows start with `IsSynced = false`; a background sync may later forward them to `POST /api/v1/internal/logs/batch` with `X-Internal-Service-Key`.
+* Never call `LogService` over HTTP inside the business transaction. Rows start with `IsSynced = false`; a background sync may later forward them to `POST /api/v1/logs/batch` as a plain REST call.
 * Audit rows are append-only. INSERT and SELECT only, never UPDATE or DELETE.
 * Field reference: `ServiceName`, `Action`, `EntityName`, `EntityId`, `UserId`, `UserName`, `OldValues`, `NewValues`, `ChangedColumns`, `TraceId`, `IpAddress`, `UserAgent`, `CreatedAt`, `IsSynced`.
