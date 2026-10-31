@@ -1,3 +1,5 @@
+name: nexus-db-auction
+
 services:
   postgres-auction:
     image: postgres:16-alpine

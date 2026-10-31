@@ -12,7 +12,15 @@ public static class DependencyInjection
     {
         var rawConnection = configuration.GetConnectionString("DefaultConnection")
             ?? configuration["CONNECTION_STRING"]
-            ?? "Host=localhost;Port=5437;Database=auction_db;Username=postgres;Password=postgres";
+            ?? configuration["AUCTION_CONNECTION_STRING"]
+            ?? configuration["AUCTION_DB_CONNECTION"]
+            ?? Environment.GetEnvironmentVariable("AUCTION_CONNECTION_STRING")
+            ?? Environment.GetEnvironmentVariable("CONNECTION_STRING");
+
+        if (string.IsNullOrWhiteSpace(rawConnection) || rawConnection.Contains("REPLACE_WITH"))
+        {
+            throw new InvalidOperationException("Database connection string for AuctionService is not configured. Set 'ConnectionStrings:DefaultConnection' or environment variable 'AUCTION_CONNECTION_STRING'.");
+        }
         var connectionString = NormalizeConnectionString(rawConnection);
 
         services.AddDbContext<AppDbContext>(options =>

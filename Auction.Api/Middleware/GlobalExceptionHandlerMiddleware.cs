@@ -35,30 +35,30 @@ public sealed class GlobalExceptionHandlerMiddleware
 
         var (statusCode, errorCode, title, detail) = exception switch
         {
-            EntityNotFoundException nfe => (
-                StatusCodes.Status404NotFound,
-                "NOT_FOUND",
-                "Resource not found",
-                nfe.Message),
             BusinessRuleValidationException bve => (
-                StatusCodes.Status400BadRequest,
-                "BUSINESS_RULE_VIOLATION",
-                "Business rule violation",
+                bve.StatusCode,
+                bve.ErrorCode,
+                GetStatusTitle(bve.StatusCode, "Business rule violation"),
                 bve.Message),
+            EntityNotFoundException nfe => (
+                nfe.StatusCode,
+                nfe.ErrorCode,
+                GetStatusTitle(nfe.StatusCode, "Resource not found"),
+                nfe.Message),
             DomainException dex => (
-                StatusCodes.Status400BadRequest,
-                "DOMAIN_ERROR",
-                "Domain error",
+                dex.StatusCode,
+                dex.ErrorCode,
+                GetStatusTitle(dex.StatusCode, "Domain error"),
                 dex.Message),
             ArgumentException aex => (
                 StatusCodes.Status400BadRequest,
                 "VAL_INVALID_ARGUMENT",
-                "Invalid argument",
+                GetStatusTitle(StatusCodes.Status400BadRequest, "Invalid argument"),
                 aex.Message),
             _ => (
                 StatusCodes.Status500InternalServerError,
                 "INTERNAL_SERVER_ERROR",
-                "An unexpected error occurred",
+                GetStatusTitle(StatusCodes.Status500InternalServerError, "An unexpected error occurred"),
                 "An internal server error occurred. Please try again later.")
         };
 
@@ -86,6 +86,17 @@ public sealed class GlobalExceptionHandlerMiddleware
 
         await context.Response.WriteAsync(JsonSerializer.Serialize(problemDetails));
     }
+
+    private static string GetStatusTitle(int statusCode, string fallback) => statusCode switch
+    {
+        StatusCodes.Status401Unauthorized => "Unauthorized",
+        StatusCodes.Status403Forbidden => "Forbidden",
+        StatusCodes.Status404NotFound => "Not found",
+        StatusCodes.Status409Conflict => "Conflict",
+        StatusCodes.Status423Locked => "Account locked",
+        StatusCodes.Status429TooManyRequests => "Too many requests",
+        _ => fallback
+    };
 }
 
 public static class GlobalExceptionHandlerMiddlewareExtensions

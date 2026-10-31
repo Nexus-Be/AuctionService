@@ -6,3 +6,8 @@
 **/obj
 **/*.Tests
 **/TestResults
+
+# Config chỉ nạp qua biến môi trường khi chạy Docker
+.env
+.env.*
+appsettings*.json

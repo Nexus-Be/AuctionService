@@ -64,19 +64,39 @@ Khi bắt đầu làm việc tại AuctionService, AI Agent **BẮT BUỘC PHẢ
 1. **TUYỆT ĐỐI KHÔNG DÙNG REPOSITORY PATTERN BỌC NGOÀI EF CORE**: Sử dụng trực tiếp `AppDbContext` (hiện thực `IAuctionDbContext`) và `DbSet<T>` trong tầng Application. Cấm tạo `IAuctionRepository`, `IBidRepository`, `UnitOfWork`.
 2. **CẤU HÌNH PORT 8005 VÀ DATABASE 5437 LÀ BẤT BIẾN**.
 3. **CẤM SỬ DỤNG gRPC VÀ BÃI BỎ MESSAGE BROKER — BẮT BUỘC DÙNG 100% RESTFUL API**:
-   - Toàn bộ giao tiếp đồng bộ sử dụng chuẩn **RESTful Web API** (JSON qua HTTP/1.1 hoặc HTTP/2).
+   - Toàn bộ giao tiếp đồng bộ sử dụng chuẩn **RESTful Web API** (JSON qua HTTP/1.1 hoặc HTTP/2) với quy chuẩn 100% số nhiều cho collections: `/api/v1/auctions`, `/api/v1/bids`.
    - Tuyệt đối cấm gRPC, Protobuf, RabbitMQ và MassTransit.
 4. **FEATURE CO-LOCATION & 1-TO-1 CONTROLLER PAIRING**:
    - Tầng Application: Toàn bộ use cases đặt tại `Auction.Application/Services/{Feature}/` gồm `I{Feature}Service.cs`, `{Feature}Service.cs`, `{Feature}Requests.cs`, `{Feature}Responses.cs`, `{Feature}Dtos.cs`.
    - Tầng Api: Ghép cặp 1-to-1 với `AuctionsController.cs` và `BidsController.cs`, chỉ inject duy nhất feature service tương ứng.
+5. **QUY CHUẨN PHÂN TRANG (PAGINATION GOVERNANCE)**:
+   - Toàn bộ thao tác phân trang phiên đấu giá, lịch sử đặt giá bắt buộc thực hiện trực tiếp tại Database qua `.Skip((page - 1) * pageSize).Take(pageSize)` và `.CountAsync()`.
+   - Đóng gói dữ liệu trả về theo cấu trúc phân trang chuẩn `PagedData<T>` (`items` và metadata `pagination: { pageIndex, pageSize, totalCount, totalPages, hasPreviousPage, hasNextPage }`).
+   - TUYỆT ĐỐI CẤM trả về danh sách thô lớn không giới hạn để Gateway tự phân trang.
+6. **QUY CHUẨN PHÂN TÁCH PUBLIC VÀ INTERNAL REST API (INTERNAL API SEGREGATION)**:
+   - Cấu trúc thư mục Controller tại `Auction.Api/Controllers/` bắt buộc chia thành `Controllers/Public/` (`/api/v1/auctions`, `/api/v1/auctions/{id}/bids`) và `Controllers/Internal/` (nếu có endpoint liên service như tự động chốt phiên).
+   - Tầng Api kích hoạt `InternalServiceAuthMiddleware` chặn mọi request `/api/v1/internal/*` không có header `X-Internal-Service-Key` hợp lệ.
+7. **QUY CHUẨN BẢO VỆ QUYỀN SỞ HỮU TÀI NGUYÊN (RESOURCE OWNERSHIP GOVERNANCE)**:
+   - Thao tác đặt giá (`Bid`) bắt buộc trích xuất `BidderId` từ `HttpContext.GetUserId()`. Tuyệt đối cấm đặt giá thay người khác.
+   - Thao tác hủy hoặc cập nhật phiên đấu giá chỉ người bán sở hữu phiên đó mới được thực hiện; can thiệp của hệ thống bắt buộc kiểm tra quyền `admin` hoặc `staff`.
 
 ---
 
-## 💬 NGUYÊN TẮC 5: QUY CHUẨN THÔNG BÁO LỖI TOÀN HỆ THỐNG
+## 💬 NGUYÊN TẮC 5: QUY CHUẨN THÔNG BÁO LỖI TOÀN HỆ THỐNG (MANDATORY ERROR & ENUM RULES)
 
-1. **Ngôn ngữ (100% English)**: Toàn bộ thông báo lỗi viết bằng tiếng Anh. Tuyệt đối không dùng tiếng Việt.
-2. **Quy cách viết hoa (Sentence case)**: Viết hoa duy nhất chữ cái đầu câu: `"Auction has already ended or is not active."`
-3. **Mã lỗi (SCREAMING_SNAKE_CASE)**: `AUCTION_NOT_FOUND`, `AUCTION_ENDED`, `BID_AMOUNT_TOO_LOW`, `VAL_INVALID_INPUT`, `UNAUTHORIZED`, `FORBIDDEN`.
+1. **Ngôn ngữ (100% English)**: Toàn bộ thông báo lỗi viết bằng 100% tiếng Anh. Tuyệt đối CẤM dùng tiếng Việt trong response và runtime exception.
+2. **Quy cách viết hoa thông báo lỗi (100% Sentence case)**:
+   - Viết hoa DUY NHẤT chữ cái đầu tiên của câu thông báo.
+   - Toàn bộ các từ tiếp theo viết thường, TRỪ các từ viết tắt kỹ thuật hoặc tên riêng: `ID`, `OTP`, `JWT`, `URL`, `UUID`, `Email`, `API`, `HTTP`.
+   - TUYỆT ĐỐI CẤM viết hoa toàn bộ thông báo lỗi (ví dụ cấm: `"AUCTION ENDED"`).
+   - Ví dụ đúng: `"Auction has already ended or is not active."`, `"Bid amount must be greater than current highest bid."`
+3. **Mã lỗi (100% SCREAMING_SNAKE_CASE)**:
+   - Viết hoa toàn bộ và nối bằng gạch dưới: `AUCTION_NOT_FOUND`, `AUCTION_ENDED`, `BID_AMOUNT_TOO_LOW`, `VAL_INVALID_INPUT`, `UNAUTHORIZED`, `FORBIDDEN`.
+   - CẤM tiền tố `ERR_`. Tiền tố `VAL_` chỉ dành riêng cho validation.
+4. **Quy chuẩn Tuần tự hóa Enum đầu ra REST API (PascalCase Serialization)**:
+   - 100% Enum trả về trong JSON envelope phải là chuỗi `PascalCase` (`"Scheduled"`, `"Running"`, `"Ended"`), cấm chuỗi in hoa toàn bộ hoặc số nguyên.
+5. **Cơ chế Duy trì Rule Bền vững ("Ghi vào Rule")**:
+   - Khi Người dùng (Sếp) chỉ thị "ghi vào rule", AI Agent bắt buộc phải lập tức ghi nhận và đồng bộ vào file này, `.agents/AGENTS.md`, root `AGENTS.md` và `.cursor/rules/`.
 
 ---
 

@@ -6,6 +6,8 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
+using global::Auction.Application.Common;
+using global::Auction.Application.Common.Models;
 using global::Auction.Application.Interfaces;
 
 public sealed class BidService : IBidService
@@ -17,12 +19,20 @@ public sealed class BidService : IBidService
         _dbContext = dbContext;
     }
 
-    public async Task<IReadOnlyList<BidDto>> ListBidsByAuctionIdAsync(Guid auctionId, CancellationToken cancellationToken = default)
+    public async Task<PagedData<BidDto>> ListBidsByAuctionIdAsync(Guid auctionId, int page, int pageSize, CancellationToken cancellationToken = default)
     {
-        var bids = await _dbContext.Bids
+        var (safePage, safePageSize) = PaginationConstants.Normalize(page, pageSize);
+
+        var query = _dbContext.Bids
             .AsNoTracking()
-            .Where(b => b.AuctionId == auctionId)
+            .Where(b => b.AuctionId == auctionId);
+
+        var totalCount = await query.CountAsync(cancellationToken);
+
+        var bids = await query
             .OrderByDescending(b => b.PlacedAt)
+            .Skip((safePage - 1) * safePageSize)
+            .Take(safePageSize)
             .Select(b => new BidDto(
                 b.Id,
                 b.AuctionId,
@@ -32,6 +42,8 @@ public sealed class BidService : IBidService
                 b.PlacedAt))
             .ToListAsync(cancellationToken);
 
-        return bids;
+        return new PagedData<BidDto>(
+            bids,
+            PaginationMetadata.Create(safePage, safePageSize, totalCount));
     }
 }
