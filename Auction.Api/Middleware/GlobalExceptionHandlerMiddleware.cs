@@ -76,16 +76,28 @@ public sealed class GlobalExceptionHandlerMiddleware
 
         var problemDetails = new
         {
-            type = $"https://tools.ietf.org/html/rfc9110#section-{(statusCode >= 500 ? "15.6.1" : "15.5.1")}",
+            type = GetRfcType(statusCode),
             title,
             status = statusCode,
             errorCode,
             detail,
-            traceId
+            traceId,
+            timestamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
         };
 
         await context.Response.WriteAsync(JsonSerializer.Serialize(problemDetails));
     }
+
+    private static string GetRfcType(int statusCode) => statusCode switch
+    {
+        StatusCodes.Status400BadRequest => "https://tools.ietf.org/html/rfc9110#section-15.5.1",
+        StatusCodes.Status401Unauthorized => "https://tools.ietf.org/html/rfc9110#section-15.5.3",
+        StatusCodes.Status403Forbidden => "https://tools.ietf.org/html/rfc9110#section-15.5.4",
+        StatusCodes.Status404NotFound => "https://tools.ietf.org/html/rfc9110#section-15.5.5",
+        StatusCodes.Status409Conflict => "https://tools.ietf.org/html/rfc9110#section-15.5.10",
+        StatusCodes.Status429TooManyRequests => "https://tools.ietf.org/html/rfc9110#section-15.5.21",
+        _ => "https://tools.ietf.org/html/rfc9110#section-15.6.1"
+    };
 
     private static string GetStatusTitle(int statusCode, string fallback) => statusCode switch
     {
