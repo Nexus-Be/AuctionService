@@ -37,6 +37,10 @@ This skill governs the standardized quality audit and review process for Pull Re
 * Báo cáo review PR của AuctionService **BẮT BUỘC** lưu tại `.agents/review/{PR_SLUG}/` nội bộ trong repository AuctionService.
 * **TUYỆT ĐỐI KHÔNG** tạo báo cáo ở Root repository (`Nexus-Be/.agents/review/`).
 
+### 1.7 Quy Chuẩn Commit & Tiêu Đề PR (Zero Emoji / Icon Rule - Rule 18)
+* Tiêu đề PR và toàn bộ commit messages **TUYỆT ĐỐI CẤM** chứa emoji hoặc icon (`✨`, `🐛`, `🔧`, `♻️`, `🧪`, `📝`, `⚡`, `👷`, `💄`, `🔒`, `🚧`...).
+* Tuân thủ 100% Conventional Commits thuần túy bằng tiếng Anh: `<type>(<scope>): <subject>` hoặc `<type>: <subject>`.
+
 ---
 
 ## 2. Cấu Trúc Báo Cáo Tại AuctionService

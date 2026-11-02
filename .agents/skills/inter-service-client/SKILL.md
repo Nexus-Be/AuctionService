@@ -26,6 +26,7 @@ description: Add or modify outbound typed REST clients in AuctionService (port 8
 4. **Mandatory Idempotency Keys:** Mutating deposit or settlement calls must transmit an `Idempotency-Key` header with a UUIDv4 string.
 5. **Identity Propagation:** Pass the bidder/user identity in the `x-user-id` header.
 6. **Timeout:** Enforce `client.Timeout = TimeSpan.FromSeconds(10)`.
+7. **W3C Distributed Tracing:** Propagate `traceparent` headers on calls to WalletService and NotificationService to maintain complete waterfall traces for auction bids and settlements in Tempo.
 
 ## Implementation Steps
 
