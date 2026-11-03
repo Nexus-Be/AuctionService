@@ -1,7 +1,9 @@
 using Auction.Api.Common;
 using Auction.Api.Extensions;
 using Auction.Application;
+using Auction.Application.Interfaces;
 using Auction.Infrastructure;
+using Auction.Infrastructure.Clients;
 using Auction.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -23,6 +25,37 @@ builder.WebHost.ConfigureKestrel(options =>
 builder.Services.AddApplicationServices();
 builder.Services.AddInfrastructureServices(builder.Configuration);
 
+// 2b. Calls to other services (REST, synchronous)
+var bypassUserCheck = builder.Configuration.GetValue<bool>("BypassUserCheck");
+if (builder.Environment.IsProduction() && bypassUserCheck)
+{
+    throw new InvalidOperationException(
+        "FATAL: BypassUserCheck cannot be enabled in the Production environment. Service startup aborted.");
+}
+
+if (bypassUserCheck)
+    Console.WriteLine("WARNING: BypassUserCheck is ON (user service calls are skipped).");
+
+var internalServiceKey = builder.Configuration["InternalSecurity:ServiceKey"];
+
+builder.Services.AddHttpClient<ICatalogClient, CatalogClient>(client =>
+{
+    client.BaseAddress = new Uri(builder.Configuration["Catalog:BaseUrl"] ?? "http://localhost:8002");
+    client.Timeout = TimeSpan.FromSeconds(5);
+    if (!string.IsNullOrWhiteSpace(internalServiceKey))
+        client.DefaultRequestHeaders.Add("X-Internal-Service-Key", internalServiceKey);
+});
+
+builder.Services.AddSingleton(new UserClientOptions(bypassUserCheck));
+builder.Services.AddHttpClient<IUserClient, UserClient>(client =>
+{
+    client.BaseAddress = new Uri(builder.Configuration["User:BaseUrl"] ?? "http://localhost:8001");
+    client.Timeout = TimeSpan.FromSeconds(5); // every call sets its own, shorter timeout
+    client.DefaultRequestHeaders.Add("X-Caller-Service", "auction-service");
+    if (!string.IsNullOrWhiteSpace(internalServiceKey))
+        client.DefaultRequestHeaders.Add("X-Internal-Service-Key", internalServiceKey);
+});
+
 // 3. REST Services
 builder.Services.AddControllers()
     .ConfigureApiBehaviorOptions(options =>
@@ -43,12 +76,14 @@ using (var scope = app.Services.CreateScope())
     {
         if (db.Database.IsRelational())
         {
+            var conn = db.Database.GetDbConnection();
+            app.Logger.LogInformation("Applying migrations to {Host}/{Database}", conn.DataSource, conn.Database);
             db.Database.Migrate();
         }
     }
     catch (Exception ex)
     {
-        app.Logger.LogWarning("Database migration deferred on startup: {Message}", ex.Message);
+        app.Logger.LogError(ex, "Database migration failed on startup");
     }
 }
 

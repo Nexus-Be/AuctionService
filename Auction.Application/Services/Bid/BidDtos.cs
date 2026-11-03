@@ -3,14 +3,12 @@ namespace Auction.Application.Services.Bid;
 using System;
 
 public sealed record BidDto(
-    Guid Id,
-    Guid AuctionId,
+    Guid BidId,
+    int SequenceNo,
     Guid BidderId,
-    int BidSeq,
+    string BidderDisplayName,
     decimal Amount,
-    DateTimeOffset PlacedAt);
-
-public sealed record PlaceBidDto(
-    Guid AuctionId,
-    Guid BidderId,
-    decimal Amount);
+    DateTimeOffset PlacedAt,
+    bool IsOutbid,
+    bool IsWinning,
+    bool IsInvalidated);
