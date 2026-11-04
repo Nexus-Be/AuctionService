@@ -28,6 +28,9 @@ public static class DependencyInjection
 
         services.AddScoped<IAuctionDbContext>(sp => sp.GetRequiredService<AppDbContext>());
 
+        // Identity propagation delegating handler for outgoing inter-service HTTP requests
+        services.AddTransient<Services.Common.IdentityPropagationHandler>();
+
         return services;
     }
 
