@@ -154,7 +154,7 @@ public sealed class BidService : IBidService
         var expectedRowVersion = BidRules.ParseRowVersion(ifMatch);
         BidRules.ValidateAmount(request.Amount);
 
-        var amount = request.Amount;
+        var amount = request.Amount!.Value;
         var key = idempotencyKey!.Trim();
         var requestHash = HashRequest(auctionId, actor.UserId, amount);
 
