@@ -16,6 +16,7 @@ public interface IAuctionDbContext
     DbSet<AuctionExtension> AuctionExtensions { get; }
     DbSet<AuctionResult> AuctionResults { get; }
     DbSet<AuctionSettlement> AuctionSettlements { get; }
+    DbSet<AuctionWinnerOffer> AuctionWinnerOffers { get; }
     DbSet<AuctionStatusHistory> AuctionStatusHistories { get; }
     DbSet<AuctionConfig> AuctionConfigs { get; }
     DbSet<IdempotencyKey> IdempotencyKeys { get; }

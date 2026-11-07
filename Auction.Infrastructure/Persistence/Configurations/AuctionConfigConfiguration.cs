@@ -12,5 +12,7 @@ public class AuctionConfigConfiguration : IEntityTypeConfiguration<AuctionConfig
         builder.Property(x => x.ConfigKey).HasMaxLength(100).IsRequired();
         builder.Property(x => x.ConfigValue).HasColumnType("jsonb");
         builder.Property(x => x.Description).HasMaxLength(500);
+        // Publishing a new version flips IsActive on the old row. Two admins doing it at once cannot both succeed.
+        builder.Property(x => x.IsActive).IsConcurrencyToken();
     }
 }

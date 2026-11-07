@@ -1,5 +1,7 @@
 using Auction.Api.Common;
 using Auction.Api.Extensions;
+using Auction.Api.Hubs;
+using Auction.Api.Workers;
 using Auction.Application;
 using Auction.Application.Interfaces;
 using Auction.Infrastructure;
@@ -21,9 +23,31 @@ builder.WebHost.ConfigureKestrel(options =>
     });
 });
 
+// 1b. Realtime (SignalR): đẩy sự kiện của phiên (đặt giá mới, huỷ phiên) tới người đang xem
+// Client chỉ gửi JoinAuction/LeaveAuction (vài chục byte), nên giới hạn kích thước tin nhận để chặn lạm dụng.
+builder.Services.AddSignalR(options => options.MaximumReceiveMessageSize = 4 * 1024);
+builder.Services.AddSingleton<IAuctionNotifier, SignalRAuctionNotifier>();
+
+// 1c. CORS cho trình duyệt kết nối thẳng tới hub. Khi đi qua Gateway và Gateway lo CORS thì để trống Cors:AllowedOrigins.
+var corsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? Array.Empty<string>();
+builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
+{
+    if (corsOrigins.Length > 0)
+        policy.WithOrigins(corsOrigins).AllowAnyHeader().AllowAnyMethod().AllowCredentials();
+    else if (builder.Environment.IsDevelopment())
+        // SignalR client gửi credentials khi negotiate, nên không dùng AllowAnyOrigin() (trình duyệt từ chối '*' kèm credentials).
+        policy.SetIsOriginAllowed(_ => true).AllowAnyHeader().AllowAnyMethod().AllowCredentials();
+}));
+
 // 2. Application & Infrastructure Dependency Injection
 builder.Services.AddApplicationServices();
 builder.Services.AddInfrastructureServices(builder.Configuration);
+
+// Đăng ký TimeProvider để các Service sử dụng thời gian hệ thống
+builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+
+// 2a. Tiến trình nền: tự chuyển Scheduled sang Running và Running sang Ended/Failed theo giờ (tắt bằng AuctionLifecycle:Enabled=false)
+builder.Services.AddHostedService<AuctionLifecycleWorker>();
 
 // 2b. Calls to other services (REST, synchronous)
 var bypassUserCheck = builder.Configuration.GetValue<bool>("BypassUserCheck");
@@ -67,6 +91,7 @@ var app = builder.Build();
 
 // 4. Default Middleware Pipeline (Exception Handler, Swagger UI)
 app.UseServiceDefaults();
+app.UseCors();
 
 // Automatically apply database migrations on startup if relational DB is available
 using (var scope = app.Services.CreateScope())
@@ -88,6 +113,7 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.MapControllers();
+app.MapHub<AuctionHub>(AuctionHub.Route);
 app.MapGet("/health", () => Results.Ok(new { status = "Healthy", service = "auction-service" }));
 
 app.Run();

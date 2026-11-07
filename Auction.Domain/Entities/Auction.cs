@@ -28,5 +28,6 @@ public class Auction : AuditableEntity<Guid>
     public ICollection<AuctionExtension> Extensions { get; set; } = new List<AuctionExtension>();
     public AuctionResult? AuctionResult { get; set; }
     public AuctionSettlement? AuctionSettlement { get; set; }
+    public ICollection<AuctionWinnerOffer> WinnerOffers { get; set; } = new List<AuctionWinnerOffer>();
     public ICollection<AuctionStatusHistory> StatusHistories { get; set; } = new List<AuctionStatusHistory>();
 }

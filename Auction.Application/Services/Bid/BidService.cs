@@ -21,23 +21,30 @@ using global::Auction.Domain.Rules;
 
 public sealed class BidService : IBidService
 {
-    private const string AnonymousName = "Người dùng ẩn danh";
+    private const string AnonymousName = "Anonymous user";
     private static readonly TimeSpan IdempotencyLifetime = TimeSpan.FromHours(24);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly IAuctionDbContext _dbContext;
     private readonly IUserClient _users;
     private readonly TimeProvider _clock;
+    private readonly IAuctionNotifier _notifier;
 
-    public BidService(IAuctionDbContext dbContext, IUserClient users, TimeProvider clock)
+    /// <summary>Khởi tạo service với DbContext, User client, đồng hồ hệ thống và bộ thông báo realtime.</summary>
+    public BidService(IAuctionDbContext dbContext, IUserClient users, TimeProvider clock, IAuctionNotifier notifier)
     {
         _dbContext = dbContext;
         _users = users;
         _clock = clock;
+        _notifier = notifier;
     }
 
     // ------------------------------------------------------------------ History
 
+    /// <summary>
+    /// Lấy lịch sử đặt giá công khai của một phiên (mới nhất trước, có phân trang). Tên người đặt giá được che bởi User service;
+    /// User service lỗi thì hiển thị là người dùng ẩn danh.
+    /// </summary>
     public async Task<PagedData<BidDto>> ListBidsByAuctionIdAsync(Guid auctionId, int page, int pageSize, CancellationToken cancellationToken = default)
     {
         var (safePage, safePageSize) = PaginationConstants.Normalize(page, pageSize);
@@ -85,8 +92,55 @@ public sealed class BidService : IBidService
         return new PagedData<BidDto>(items, PaginationMetadata.Create(safePage, safePageSize, totalCount));
     }
 
+    /// <summary>Lấy các lượt đặt giá của chính người dùng qua mọi phiên (mới nhất trước, có phân trang), kèm tên và trạng thái phiên.</summary>
+    public async Task<PagedData<MyBidDto>> ListMyBidsAsync(Guid bidderId, int page, int pageSize, CancellationToken cancellationToken = default)
+    {
+        var (safePage, safePageSize) = PaginationConstants.Normalize(page, pageSize);
+
+        var query = _dbContext.BidHistories
+            .AsNoTracking()
+            .Where(h => h.BidderId == bidderId && !h.IsDeleted && !h.Auction!.IsDeleted);
+
+        var totalCount = await query.CountAsync(cancellationToken);
+
+        var rows = await query
+            .OrderByDescending(h => h.PlacedAt)
+            .ThenByDescending(h => h.SequenceNo)
+            .Skip((safePage - 1) * safePageSize)
+            .Take(safePageSize)
+            .Select(h => new
+            {
+                h.BidId,
+                h.AuctionId,
+                Title = h.Auction!.SnapshotProductTitle,
+                Status = h.Auction.AuctionState == null ? (AuctionStatus?)null : h.Auction.AuctionState.Status,
+                h.SequenceNo,
+                h.Amount,
+                h.PlacedAt,
+                h.IsOutbid,
+                h.IsWinning,
+                h.IsInvalidated
+            })
+            .ToListAsync(cancellationToken);
+
+        var items = rows
+            .Select(r => new MyBidDto(
+                r.BidId, r.AuctionId, r.Title, r.Status, r.SequenceNo,
+                r.Amount, r.PlacedAt, r.IsOutbid, r.IsWinning, r.IsInvalidated))
+            .ToList();
+
+        return new PagedData<MyBidDto>(items, PaginationMetadata.Create(safePage, safePageSize, totalCount));
+    }
+
     // ------------------------------------------------------------------ Place a bid
 
+    /// <summary>
+    /// Đặt giá cho một phiên. Bắt buộc có Idempotency-Key và If-Match (RowVersion); gửi lại cùng key và cùng nội dung thì trả kết quả lần đầu, khác nội dung thì 422.
+    /// Chặn seller đặt giá phiên của chính mình; kiểm tra phiên đang chạy, giá tối thiểu và quyền đặt giá với User service.
+    /// Khi hợp lệ: lưu bid, đánh dấu bid dẫn đầu cũ là bị vượt, cập nhật giá hiện tại, gia hạn chống bắn tỉa nếu đặt sát giờ kết thúc,
+    /// lưu idempotency và audit, rồi báo realtime BidPlaced sau khi lưu thành công. Response và sự kiện kèm giá cũ (PreviousPriceAmount)
+    /// và RowVersion mới để FE dùng làm If-Match cho lần đặt giá tiếp theo.
+    /// </summary>
     public async Task<PlaceBidResponse> PlaceBidAsync(
         ActorContext actor, Guid auctionId, string? idempotencyKey, string? ifMatch,
         PlaceBidRequest request, CancellationToken cancellationToken = default)
@@ -127,6 +181,11 @@ public sealed class BidService : IBidService
             throw new EntityNotFoundException("AUCTION_NOT_FOUND", "Auction", auctionId);
 
         var state = auction.AuctionState;
+        // A seller can bid on auctions of other sellers, never on their own.
+        if (auction.SellerId == actor.UserId)
+            throw new DomainException(
+                "SELLER_CANNOT_BID_OWN_AUCTION", "A seller cannot bid on their own auction.", 403);
+
         BidRules.EnsureBiddable(state.Status, state.ScheduledEndAt, now);
 
         // 4. The bidder saw an older version of the auction: someone else bid first.
@@ -190,6 +249,7 @@ public sealed class BidService : IBidService
             extensionCount = state.ExtensionCount
         };
 
+        var previousPriceAmount = state.CurrentPriceAmount;
         state.CurrentPriceAmount = amount;
         state.CurrentWinnerId = actor.UserId;
         state.BidCount = bidSeq;
@@ -221,7 +281,8 @@ public sealed class BidService : IBidService
         }
 
         var response = new PlaceBidResponse(
-            bid.Id, auctionId, bidSeq, amount, now, amount, state.BidCount, state.ScheduledEndAt, state.ExtensionCount);
+            bid.Id, auctionId, bidSeq, amount, now, amount, state.BidCount, state.ScheduledEndAt, state.ExtensionCount,
+            previousPriceAmount, state.RowVersion);
 
         _dbContext.IdempotencyKeys.Add(new IdempotencyKey
         {
@@ -265,11 +326,21 @@ public sealed class BidService : IBidService
                 "CONCURRENT_UPDATE", "The auction changed while the bid was being saved. Reload it and try again.", 409);
         }
 
+        // Lượt đặt giá đã được lưu: báo cho người đang xem phiên. Không chạy khi replay idempotent vì nhánh đó đã return trước đó.
+        await _notifier.BidPlacedAsync(
+            auctionId,
+            new BidPlacedMessage(
+                auctionId, bid.Id, bidSeq, amount, amount,
+                state.BidCount, now, state.ScheduledEndAt, state.ExtensionCount,
+                previousPriceAmount, state.RowVersion),
+            CancellationToken.None);
+
         return response;
     }
 
     // ------------------------------------------------------------------ Helpers
 
+    /// <summary>Lấy tên đã che của nhiều người dùng từ User service. User service lỗi thì trả tập rỗng vì tên chỉ là dữ liệu hiển thị.</summary>
     private async Task<IReadOnlyDictionary<Guid, UserPublicInfo>> TryGetNamesAsync(
         IReadOnlyCollection<Guid> userIds, CancellationToken cancellationToken)
     {
@@ -287,12 +358,14 @@ public sealed class BidService : IBidService
         }
     }
 
+    /// <summary>Băm nội dung yêu cầu đặt giá (phiên, người dùng, số tiền) để phát hiện cùng Idempotency-Key nhưng khác nội dung.</summary>
     private static string HashRequest(Guid auctionId, Guid userId, decimal amount)
     {
         var text = $"{auctionId:N}|{userId:N}|{amount.ToString("0.00", CultureInfo.InvariantCulture)}";
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
     }
 
+    /// <summary>Đọc lại kết quả đặt giá đã lưu cho một Idempotency-Key. Nội dung rỗng hoặc hỏng thì trả null.</summary>
     private static PlaceBidResponse? DeserializeResponse(string? body)
     {
         if (string.IsNullOrWhiteSpace(body))

@@ -261,6 +261,9 @@ public static class AuctionSeedData
             {
                 Id = Guid.Parse("aa700000-0000-0000-0000-000000000001"),
                 AuctionId = settledAuctionId,
+                WinnerId = buyerUserId,
+                WinningBidId = bid2Id,
+                Status = AuctionSettlementStatus.Paid,
                 OrderId = Guid.Parse("01000000-0000-0000-0000-000000000001"),
                 PaymentDeadlineAt = seedDate.AddDays(-1),
                 PaidAt = seedDate.AddDays(-2),
@@ -289,6 +292,106 @@ public static class AuctionSeedData
                 UserAgent = "NexusClient/1.0",
                 CreatedAt = seedDate,
                 IsSynced = true
+            }
+        );
+
+        // 11. Sample Scheduled auction (starts far in the future). Use it to try edit and cancel.
+        // The product and SKU ids are sample values: creating or recreating an auction calls Catalog,
+        // so the same ids must exist in Catalog as auction items owned by the seller.
+        var scheduledAuctionId = Guid.Parse("aa000000-0000-0000-0000-000000000003");
+        var scheduledProductId = Guid.Parse("44000000-0000-0000-0000-000000000005");
+        var scheduledStart = new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        modelBuilder.Entity<Auction>().HasData(
+            new Auction
+            {
+                Id = scheduledAuctionId,
+                ProductId = scheduledProductId,
+                SkuId = Guid.Parse("44100000-0000-0000-0000-000000000005"),
+                SellerId = sellerUserId,
+                SnapshotProductTitle = "Sample scheduled auction for editing and cancelling",
+                StartPriceAmount = 300000m,
+                BidStepAmount = 20000m,
+                ScheduledStartAt = scheduledStart,
+                OriginalEndAt = scheduledStart.AddDays(7),
+                AntiSnipingExtensionMinutes = 5,
+                MaxExtensionCount = 10,
+                CreatedBy = sellerUserId,
+                CreatedAt = seedDate,
+                UpdatedAt = seedDate,
+                IsDeleted = false
+            }
+        );
+
+        modelBuilder.Entity<AuctionState>().HasData(
+            new AuctionState
+            {
+                Id = Guid.Parse("aa100000-0000-0000-0000-000000000003"),
+                AuctionId = scheduledAuctionId,
+                Status = AuctionStatus.Scheduled,
+                BidCount = 0,
+                ExtensionCount = 0,
+                ScheduledEndAt = scheduledStart.AddDays(7),
+                RowVersion = 1,
+                CreatedAt = seedDate,
+                UpdatedAt = seedDate,
+                IsDeleted = false
+            }
+        );
+
+        modelBuilder.Entity<ProductOpenAuction>().HasData(
+            new ProductOpenAuction
+            {
+                Id = Guid.Parse("aa200000-0000-0000-0000-000000000003"),
+                ProductId = scheduledProductId,
+                AuctionId = scheduledAuctionId,
+                CreatedAt = seedDate,
+                UpdatedAt = seedDate,
+                IsDeleted = false
+            }
+        );
+
+        // 12. Sample Failed auction (ended without any bid). Use it to try "recreate".
+        // A failed auction holds no ProductOpenAuction row, so its product can get a new auction.
+        var failedAuctionId = Guid.Parse("aa000000-0000-0000-0000-000000000004");
+        var failedStart = seedDate.AddDays(10);
+
+        modelBuilder.Entity<Auction>().HasData(
+            new Auction
+            {
+                Id = failedAuctionId,
+                ProductId = Guid.Parse("44000000-0000-0000-0000-000000000006"),
+                SkuId = Guid.Parse("44100000-0000-0000-0000-000000000006"),
+                SellerId = sellerUserId,
+                SnapshotProductTitle = "Sample failed auction for recreating",
+                StartPriceAmount = 200000m,
+                BidStepAmount = 10000m,
+                ScheduledStartAt = failedStart,
+                OriginalEndAt = failedStart.AddDays(7),
+                AntiSnipingExtensionMinutes = 5,
+                MaxExtensionCount = 10,
+                CreatedBy = sellerUserId,
+                CreatedAt = seedDate,
+                UpdatedAt = seedDate,
+                IsDeleted = false
+            }
+        );
+
+        modelBuilder.Entity<AuctionState>().HasData(
+            new AuctionState
+            {
+                Id = Guid.Parse("aa100000-0000-0000-0000-000000000004"),
+                AuctionId = failedAuctionId,
+                Status = AuctionStatus.Failed,
+                BidCount = 0,
+                ExtensionCount = 0,
+                ScheduledEndAt = failedStart.AddDays(7),
+                StartedAt = failedStart,
+                EndedAt = failedStart.AddDays(7),
+                RowVersion = 1,
+                CreatedAt = seedDate,
+                UpdatedAt = seedDate,
+                IsDeleted = false
             }
         );
     }

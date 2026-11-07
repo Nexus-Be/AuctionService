@@ -33,13 +33,30 @@ public class BidsController : ControllerBase
         return Ok(bids);
     }
 
+    /// <summary>Buyer lists their own bids across auctions (newest first).</summary>
+    [HttpGet("~/api/v1/me/bids")]
+    [ProducesResponseType(typeof(PagedData<MyBidDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListMyBids(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken ct = default)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("buyer") && !this.HasRole("seller"))
+            return this.ForbiddenError("Only buyer or seller accounts can use bids.");
+
+        var result = await _bidService.ListMyBidsAsync(userId, page, pageSize, ct);
+        return Ok(result);
+    }
+
     /// <summary>Buyer places a bid. Needs the Idempotency-Key and If-Match (auction row version) headers.</summary>
     [HttpPost]
     [ProducesResponseType(typeof(PlaceBidResponse), StatusCodes.Status201Created)]
     public async Task<IActionResult> PlaceBid([FromRoute] Guid auctionId, [FromBody] PlaceBidRequest request, CancellationToken ct)
     {
         if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
-        if (!this.EnsureRole("buyer", out var roleError)) return roleError;
+        if (!this.HasRole("buyer") && !this.HasRole("seller"))
+            return this.ForbiddenError("Only buyer or seller accounts can use bids.");
 
         var actor = new ActorContext(userId, this.GetTraceId(), this.GetClientIp());
         var result = await _bidService.PlaceBidAsync(

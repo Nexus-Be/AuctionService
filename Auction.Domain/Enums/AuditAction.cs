@@ -8,5 +8,9 @@ public enum AuditAction
     BidPlace = 3,
     BidInvalidate = 4,
     AuctionSettle = 5,
-    ConfigUpdate = 6
+    ConfigUpdate = 6,
+    WinnerOfferAccept = 7,
+    WinnerOfferDecline = 8,
+    AuctionStart = 9,
+    AuctionEnd = 10
 }
