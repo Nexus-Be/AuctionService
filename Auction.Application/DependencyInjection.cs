@@ -2,6 +2,8 @@ namespace Auction.Application;
 
 using Microsoft.Extensions.DependencyInjection;
 using Auction.Application.Services.Auction;
+using Auction.Application.Services.AuctionConfig;
+using Auction.Application.Services.AuctionLifecycle;
 using Auction.Application.Services.Bid;
 
 public static class DependencyInjection
@@ -10,6 +12,8 @@ public static class DependencyInjection
     {
         services.AddScoped<IAuctionService, AuctionService>();
         services.AddScoped<IBidService, BidService>();
+        services.AddScoped<IAuctionConfigService, AuctionConfigService>();
+        services.AddScoped<IAuctionLifecycleService, AuctionLifecycleService>();
         return services;
     }
 }

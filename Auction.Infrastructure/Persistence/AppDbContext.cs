@@ -19,6 +19,7 @@ public class AppDbContext : DbContext, IAuctionDbContext
     public DbSet<AuctionExtension> AuctionExtensions => Set<AuctionExtension>();
     public DbSet<AuctionResult> AuctionResults => Set<AuctionResult>();
     public DbSet<AuctionSettlement> AuctionSettlements => Set<AuctionSettlement>();
+    public DbSet<AuctionWinnerOffer> AuctionWinnerOffers => Set<AuctionWinnerOffer>();
     public DbSet<AuctionStatusHistory> AuctionStatusHistories => Set<AuctionStatusHistory>();
     public DbSet<AuctionConfig> AuctionConfigs => Set<AuctionConfig>();
     public DbSet<IdempotencyKey> IdempotencyKeys => Set<IdempotencyKey>();
