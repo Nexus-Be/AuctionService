@@ -43,6 +43,9 @@ builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
 builder.Services.AddApplicationServices();
 builder.Services.AddInfrastructureServices(builder.Configuration);
 
+// Đăng ký TimeProvider để các Service sử dụng thời gian hệ thống
+builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+
 // 2a. Tiến trình nền: tự chuyển Scheduled sang Running và Running sang Ended/Failed theo giờ (tắt bằng AuctionLifecycle:Enabled=false)
 builder.Services.AddHostedService<AuctionLifecycleWorker>();
 
