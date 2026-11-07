@@ -1,8 +1,4 @@
 namespace Auction.Application.Services.Bid;
 
-using System;
-
-public sealed record PlaceBidRequest(
-    Guid AuctionId,
-    Guid BidderId,
-    decimal Amount);
+/// <summary>Amount is nullable so that a missing value is reported with a clear message.</summary>
+public sealed record PlaceBidRequest(decimal? Amount);

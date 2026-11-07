@@ -134,6 +134,7 @@ public static class ServiceDefaultsExtensions
     public static WebApplication UseServiceDefaults(this WebApplication app)
     {
         app.UseGlobalExceptionHandler();
+        app.UseMiddleware<UserContextMiddleware>();
         // Internal service key check is temporarily disabled. Inter-service calls use plain REST routes.
         // app.UseMiddleware<InternalServiceAuthMiddleware>();
 

@@ -1,5 +1,7 @@
 namespace Auction.Api.Common;
 
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using Microsoft.AspNetCore.Http;
@@ -14,17 +16,22 @@ public static class ApiValidationProblemFactory
     public static IActionResult Create(ActionContext context)
     {
         var traceId = Activity.Current?.Id ?? context.HttpContext.TraceIdentifier;
-        var messages = CollectMessages(context.ModelState);
-        var detail = messages.Any(LeaksInternals) ? UnreadableBodyDetail : string.Join(" ", messages);
+        var errors = CollectErrors(context.ModelState);
+        var messages = errors.Values.SelectMany(v => v).ToList();
+        var detail = messages.Any(m => m == UnreadableBodyDetail)
+            ? UnreadableBodyDetail
+            : (messages.Count > 0 ? string.Join(" ", messages) : GenericDetail);
 
         var problem = new
         {
             type = "https://tools.ietf.org/html/rfc9110#section-15.5.1",
-            title = "Validation error",
+            title = "One or more validation errors occurred.",
             status = StatusCodes.Status400BadRequest,
             errorCode = "VAL_INVALID_INPUT",
             detail,
-            traceId
+            errors = errors.Count > 0 ? errors : null,
+            traceId,
+            timestamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
         };
 
         return new ObjectResult(problem)
@@ -34,26 +41,35 @@ public static class ApiValidationProblemFactory
         };
     }
 
-    private static List<string> CollectMessages(ModelStateDictionary modelState)
+    private static Dictionary<string, string[]> CollectErrors(ModelStateDictionary modelState)
     {
-        var messages = new List<string>();
+        var dict = new Dictionary<string, string[]>();
 
         foreach (var entry in modelState)
         {
-            if (entry.Value is null)
+            if (entry.Value is null || entry.Value.Errors.Count == 0)
             {
                 continue;
             }
 
-            foreach (var error in entry.Value.Errors)
+            var errs = entry.Value.Errors
+                .Select(error =>
+                {
+                    var msg = string.IsNullOrWhiteSpace(error.ErrorMessage)
+                        ? $"{entry.Key} is invalid."
+                        : error.ErrorMessage.Trim();
+                    return LeaksInternals(msg) ? UnreadableBodyDetail : msg;
+                })
+                .Distinct()
+                .ToArray();
+
+            if (errs.Length > 0)
             {
-                messages.Add(string.IsNullOrWhiteSpace(error.ErrorMessage)
-                    ? $"{entry.Key} is invalid."
-                    : error.ErrorMessage.Trim());
+                dict[entry.Key] = errs;
             }
         }
 
-        return messages.Count == 0 ? new List<string> { GenericDetail } : messages.Distinct().ToList();
+        return dict;
     }
 
     private static bool LeaksInternals(string message) =>
