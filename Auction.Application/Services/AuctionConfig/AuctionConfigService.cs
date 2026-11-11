@@ -21,6 +21,7 @@ public sealed class AuctionConfigService : IAuctionConfigService
     private const string PolicyConfigKey = "DEFAULT_AUCTION_POLICY";
     private const string AntiSnipingMinutesName = "antiSnipingExtensionMinutes";
     private const string MaxExtensionCountName = "maxExtensionCount";
+    private const string DefaultBidStepPercentName = "defaultBidStepPercent";
 
     private const int MinAntiSnipingMinutes = 0;
     private const int MaxAntiSnipingMinutes = 60;
@@ -115,8 +116,15 @@ public sealed class AuctionConfigService : IAuctionConfigService
     public async Task<AuctionConfigDto> UpdateAsync(
         ActorContext actor, UpdateAuctionConfigRequest request, CancellationToken cancellationToken = default)
     {
-        if (request.AntiSnipingExtensionMinutes is null && request.MaxExtensionCount is null)
+        if (request.AntiSnipingExtensionMinutes is null && request.MaxExtensionCount is null &&
+            request.DefaultBidStepPercent is null)
             throw Invalid("VAL_NO_FIELDS_TO_UPDATE", "At least one field must be provided.");
+
+        if (request.DefaultBidStepPercent is { } percent &&
+            (percent <= 0m || percent > 100m || percent != decimal.Round(percent, 2)))
+            throw Invalid(
+                "VAL_INVALID_DEFAULT_BID_STEP_PERCENT",
+                "Default bid step percent must be greater than 0 and at most 100, with at most two decimal places.");
 
         if (request.AntiSnipingExtensionMinutes is { } minutes &&
             (minutes < MinAntiSnipingMinutes || minutes > MaxAntiSnipingMinutes))
@@ -148,6 +156,8 @@ public sealed class AuctionConfigService : IAuctionConfigService
             changed |= SetInt(policy, AntiSnipingMinutesName, newMinutes);
         if (request.MaxExtensionCount is { } newCount)
             changed |= SetInt(policy, MaxExtensionCountName, newCount);
+        if (request.DefaultBidStepPercent is { } newPercent)
+            changed |= SetDecimal(policy, DefaultBidStepPercentName, newPercent);
 
         // Nothing changes, so no new version and no audit entry are created.
         if (!changed)
@@ -189,6 +199,17 @@ public sealed class AuctionConfigService : IAuctionConfigService
         }
 
         return ToDto(newConfig);
+    }
+
+    /// <summary>Gán một thuộc tính số thập phân vào JSON cấu hình và trả về true nếu giá trị thực sự thay đổi.</summary>
+    private static bool SetDecimal(JsonObject policy, string name, decimal value)
+    {
+        decimal? current = policy[name] is JsonValue node && node.TryGetValue<decimal>(out var existing) ? existing : null;
+        if (current == value)
+            return false;
+
+        policy[name] = value;
+        return true;
     }
 
     /// <summary>Gán một thuộc tính số nguyên vào JSON cấu hình và trả về true nếu giá trị thực sự thay đổi.</summary>
