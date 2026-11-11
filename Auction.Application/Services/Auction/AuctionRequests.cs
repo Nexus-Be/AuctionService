@@ -3,9 +3,8 @@ namespace Auction.Application.Services.Auction;
 using System;
 using global::Auction.Domain.Enums;
 
-// The start price and the schedule are always chosen by the seller. Fields are nullable so that a missing value
-// is reported with a clear message. The one exception is BidStepAmount when creating or recreating an auction:
-// left empty, it becomes the default percent of the start price (see DEFAULT_AUCTION_POLICY).
+// Prices and schedule are always chosen by the seller. Fields are nullable so that a missing value
+// is reported with a clear message instead of being replaced by a default.
 
 /// <summary>SkuId là mã biến thể (variant) của Catalog. ProductId không nhận từ client, được lấy từ Catalog theo SkuId.</summary>
 public sealed record CreateAuctionRequest(
@@ -42,15 +41,7 @@ public enum SettlementPaymentStatus
     /// <summary>Thanh toán đã hết hạn.</summary>
     Expired = 2,
     /// <summary>Thanh toán đã bị huỷ.</summary>
-    Cancelled = 3,
-    /// <summary>Seller đã chấp nhận đơn sau khi Buyer thanh toán. Auction chốt bán sản phẩm ở Catalog.</summary>
-    SellerAccepted = 4,
-    /// <summary>Seller từ chối đơn (Commerce đã hoàn tiền Buyer). Phiên chuyển Failed và nhả sản phẩm.</summary>
-    SellerRejected = 5,
-    /// <summary>Seller không duyệt đơn trong hạn (Commerce đã hoàn tiền Buyer). Xử lý giống SellerRejected.</summary>
-    SellerExpired = 6,
-    /// <summary>Buyer không thanh toán trước hạn. Xử lý giống Expired.</summary>
-    PaymentTimedOut = 7
+    Cancelled = 3
 }
 
 /// <summary>Dữ liệu Commerce gửi để cập nhật kết quả thanh toán của phiên đấu giá.</summary>

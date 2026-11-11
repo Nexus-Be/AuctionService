@@ -20,21 +20,13 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
     private readonly IAuctionDbContext _dbContext;
     private readonly TimeProvider _clock;
     private readonly IAuctionNotifier _notifier;
-    private readonly INotificationClient _notifications;
-    private readonly ICatalogSync _catalogSync;
-    private readonly ICommerceSync _commerceSync;
 
     /// <summary>Khởi tạo service với DbContext, đồng hồ hệ thống và bộ thông báo realtime.</summary>
-    public AuctionLifecycleService(
-        IAuctionDbContext dbContext, TimeProvider clock, IAuctionNotifier notifier, INotificationClient notifications,
-        ICatalogSync catalogSync, ICommerceSync commerceSync)
+    public AuctionLifecycleService(IAuctionDbContext dbContext, TimeProvider clock, IAuctionNotifier notifier)
     {
         _dbContext = dbContext;
         _clock = clock;
         _notifier = notifier;
-        _notifications = notifications;
-        _catalogSync = catalogSync;
-        _commerceSync = commerceSync;
     }
 
     /// <summary>Tìm các phiên Scheduled đã tới giờ bắt đầu. Chỉ đọc mã phiên, việc chuyển trạng thái làm riêng từng phiên.</summary>
@@ -162,7 +154,6 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
         AuctionStatus toStatus;
         string reason;
         object newValues;
-        AuctionWinnerNotification? winnerNotice = null;
 
         if (winningBid is null)
         {
@@ -196,50 +187,33 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
                 paymentDeadlineAt = paymentDeadline
             };
 
-            // Thêm vào DbSet tường minh: entity mới đã có sẵn Id (Guid) nên nếu chỉ gán qua navigation,
-            // EF coi là dòng đã tồn tại (Modified) và sinh UPDATE (0 dòng) thay vì INSERT.
-            var result = auction.AuctionResult;
-            if (result is null)
+            var result = auction.AuctionResult ??= new AuctionResult
             {
-                result = new AuctionResult
-                {
-                    Id = Guid.NewGuid(),
-                    AuctionId = auctionId,
-                    DeterminedAt = now,
-                    CreatedAt = now,
-                    UpdatedAt = now
-                };
-                _dbContext.AuctionResults.Add(result);
-            }
+                Id = Guid.NewGuid(),
+                AuctionId = auctionId,
+                DeterminedAt = now,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
             result.WinnerId = winningBid.BidderId;
             result.WinningBidId = winningBid.BidId;
             result.FinalPriceAmount = winningBid.Amount;
             result.DeterminedAt = now;
             result.UpdatedAt = now;
 
-            var settlement = auction.AuctionSettlement;
-            if (settlement is null)
+            var settlement = auction.AuctionSettlement ??= new AuctionSettlement
             {
-                settlement = new AuctionSettlement
-                {
-                    Id = Guid.NewGuid(),
-                    AuctionId = auctionId,
-                    Status = AuctionSettlementStatus.PendingPayment,
-                    CreatedAt = now,
-                    UpdatedAt = now
-                };
-                _dbContext.AuctionSettlements.Add(settlement);
-            }
+                Id = Guid.NewGuid(),
+                AuctionId = auctionId,
+                Status = AuctionSettlementStatus.PendingPayment,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
             settlement.WinnerId = winningBid.BidderId;
             settlement.WinningBidId = winningBid.BidId;
             settlement.Status = AuctionSettlementStatus.PendingPayment;
             settlement.PaymentDeadlineAt = paymentDeadline;
             settlement.UpdatedAt = now;
-
-            // Gửi thông báo cho người thắng sau khi kết quả đã được lưu (xem bên dưới).
-            winnerNotice = new AuctionWinnerNotification(
-                auctionId, auction.SnapshotProductTitle, result.Id, winningBid.BidId, winningBid.BidderId,
-                auction.SellerId, winningBid.Amount, now, paymentDeadline);
         }
 
         _dbContext.AuctionStatusHistories.Add(new AuctionStatusHistory
@@ -263,113 +237,6 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
 
         await _notifier.AuctionStatusChangedAsync(
             auctionId, new AuctionStatusChangedMessage(auctionId, toStatus.ToString(), now), CancellationToken.None);
-
-        // Báo cho người thắng qua Notification service (gửi nền, không chờ, lỗi chỉ ghi log).
-        // Phiên không có bid hợp lệ thì phiên Failed: mở khoá sản phẩm ở Catalog (gửi nền, có thử lại).
-        if (winnerNotice is not null)
-        {
-            _notifications.NotifyAuctionWinner(winnerNotice);
-
-            // Đẩy settlement sang Commerce để tạo đơn cho người thắng (gửi nền, có thử lại).
-            _commerceSync.PushSettlement(auctionId);
-        }
-        else
-        {
-            _catalogSync.UnlockProduct(auction.ProductId, auctionId);
-        }
-
-        return true;
-    }
-
-    /// <summary>Tìm các lời mời mua thay còn Pending đã quá hạn phản hồi. Chỉ đọc mã lời mời, việc đóng lời mời làm riêng từng cái.</summary>
-    public async Task<IReadOnlyList<Guid>> FindWinnerOffersToExpireAsync(int limit, CancellationToken cancellationToken = default)
-    {
-        var now = _clock.GetUtcNow();
-
-        return await _dbContext.AuctionWinnerOffers
-            .AsNoTracking()
-            .Where(o => !o.IsDeleted
-                && o.Status == AuctionWinnerOfferStatus.Pending
-                && o.ExpiresAt <= now)
-            .OrderBy(o => o.ExpiresAt)
-            .Select(o => o.Id)
-            .Take(limit)
-            .ToListAsync(cancellationToken);
-    }
-
-    /// <summary>
-    /// Đóng một lời mời quá hạn: lời mời sang Expired. Phiên đang Ended thì sang Failed, nhả sản phẩm (xoá dòng phiên mở) để seller tạo lại phiên,
-    /// ghi lịch sử trạng thái, audit và báo realtime AuctionStatusChanged. RowVersion của phiên chống việc đóng lời mời cùng lúc bidder chấp nhận:
-    /// lưu thất bại thì trả false và lời mời được xét lại ở lượt sau.
-    /// </summary>
-    public async Task<bool> ExpireWinnerOfferAsync(Guid offerId, CancellationToken cancellationToken = default)
-    {
-        var now = _clock.GetUtcNow();
-
-        var offer = await _dbContext.AuctionWinnerOffers
-            .FirstOrDefaultAsync(o => o.Id == offerId && !o.IsDeleted, cancellationToken);
-        if (offer is null
-            || offer.Status != AuctionWinnerOfferStatus.Pending
-            || offer.ExpiresAt > now)
-        {
-            return false;
-        }
-
-        var auction = await _dbContext.Auctions
-            .Include(a => a.AuctionState)
-            .FirstOrDefaultAsync(a => a.Id == offer.AuctionId && !a.IsDeleted, cancellationToken);
-        var state = auction?.AuctionState;
-
-        offer.Status = AuctionWinnerOfferStatus.Expired;
-        offer.UpdatedAt = now;
-
-        var failAuction = state is not null && state.Status == AuctionStatus.Ended;
-        if (failAuction)
-        {
-            state!.Status = AuctionStatus.Failed;
-            state.UpdatedAt = now;
-            state.RowVersion += 1;
-
-            // Nhả sản phẩm để seller tạo lại phiên. Index unique theo ProductId bỏ qua xoá mềm nên phải xoá thật dòng này.
-            var openAuction = await _dbContext.ProductOpenAuctions
-                .FirstOrDefaultAsync(p => p.AuctionId == offer.AuctionId, cancellationToken);
-            if (openAuction is not null)
-                _dbContext.ProductOpenAuctions.Remove(openAuction);
-
-            _dbContext.AuctionStatusHistories.Add(new AuctionStatusHistory
-            {
-                Id = Guid.NewGuid(),
-                AuctionId = offer.AuctionId,
-                FromStatus = AuctionStatus.Ended,
-                ToStatus = AuctionStatus.Failed,
-                Reason = "The winner offer expired without an answer.",
-                ChangedAt = now,
-                CreatedAt = now,
-                UpdatedAt = now
-            });
-        }
-
-        _dbContext.AddAuditLog(
-            AuditAction.WinnerOfferExpire, "Auction", offer.AuctionId.ToString(),
-            oldValues: new { offerId, offerStatus = AuctionWinnerOfferStatus.Pending.ToString() },
-            newValues: new
-            {
-                offerId,
-                offerStatus = AuctionWinnerOfferStatus.Expired.ToString(),
-                status = state?.Status.ToString()
-            });
-
-        if (!await TrySaveAsync(cancellationToken))
-            return false;
-
-        if (failAuction)
-        {
-            // Đã lưu: mở khoá sản phẩm ở Catalog (gửi nền, có thử lại), rồi báo realtime phiên đã Failed.
-            _catalogSync.UnlockProduct(auction!.ProductId, offer.AuctionId);
-
-            await _notifier.AuctionStatusChangedAsync(
-                offer.AuctionId, new AuctionStatusChangedMessage(offer.AuctionId, AuctionStatus.Failed.ToString(), now), CancellationToken.None);
-        }
 
         return true;
     }

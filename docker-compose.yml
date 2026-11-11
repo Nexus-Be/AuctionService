@@ -21,8 +21,6 @@ services:
       ASPNETCORE_ENVIRONMENT: "${ASPNETCORE_ENVIRONMENT:-Development}"
       ConnectionStrings__DefaultConnection: "${AUCTION_DB_CONNECTION:?AUCTION_DB_CONNECTION is required}"
       InternalSecurity__ServiceKey: "${INTERNAL_SERVICE_SECRET:-eaT0Ombups70WJzd85CBBpp8rAno55SxKn1qvYBGH9e}"
-      Catalog__BaseUrl: "http://nexus-catalog-service:8002"
-      User__BaseUrl: "http://nexus-user-service:8001"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4317}"
     restart: unless-stopped
 

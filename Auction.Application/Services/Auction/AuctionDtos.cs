@@ -141,29 +141,3 @@ public sealed record AuctionSettlementDto(
     Guid? OrderId,
     DateTimeOffset? PaidAt,
     DateTimeOffset DeterminedAt);
-
-/// <summary>
-/// Tiến trình xử lý hậu đấu giá (saga) của một phiên đã có người thắng, dựng từ dữ liệu có sẵn. Chỉ admin được xem.
-/// SagaType luôn là AuctionSettlement, CurrentState là tên bước hiện tại, StateData chứa chi tiết các bước.
-/// </summary>
-public sealed record AuctionSagaDto(
-    Guid AuctionId,
-    string SagaType,
-    string CurrentState,
-    AuctionSagaStateData StateData,
-    DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
-
-/// <summary>Chi tiết trạng thái saga: phiên và seller, trạng thái phiên, đã kết thúc hay chưa, đang chờ gì (kèm hạn và cờ quá hạn) và danh sách các bước.</summary>
-public sealed record AuctionSagaStateData(
-    Guid ProductId,
-    Guid SellerId,
-    AuctionStatus Status,
-    bool IsFinished,
-    string? WaitingFor,
-    DateTimeOffset? DeadlineAt,
-    bool IsOverdue,
-    IReadOnlyList<AuctionSagaStepDto> Steps);
-
-/// <summary>Một bước của saga. State là Completed, InProgress, Pending, Skipped hoặc Failed; At là thời điểm bước đó xảy ra (nếu đã xảy ra).</summary>
-public sealed record AuctionSagaStepDto(string Name, string State, DateTimeOffset? At, string? Detail);

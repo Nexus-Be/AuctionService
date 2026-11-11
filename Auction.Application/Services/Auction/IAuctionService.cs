@@ -43,9 +43,6 @@ public interface IAuctionService
     /// <summary>Admin huỷ cưỡng chế phiên chưa kết thúc, bắt buộc có lý do.</summary>
     Task<AuctionCancelledResponse> ForceCancelAsync(ActorContext actor, Guid auctionId, ForceCancelAuctionRequest request, CancellationToken cancellationToken = default);
 
-    /// <summary>Admin xem tiến trình hậu đấu giá (saga) của một phiên: các bước, bước hiện tại, hạn đang chờ và cờ quá hạn. Phiên không tồn tại trả 404.</summary>
-    Task<AuctionSagaDto> GetSagaAsync(Guid auctionId, CancellationToken cancellationToken = default);
-
     /// <summary>Bidder được mời chấp nhận trở thành người thắng thay người thắng trước. Phiên phải còn Ended và lời mời còn Pending, chưa hết hạn.</summary>
     Task<WinnerOfferResponse> AcceptWinnerOfferAsync(ActorContext actor, Guid auctionId, Guid offerId, CancellationToken cancellationToken = default);
 

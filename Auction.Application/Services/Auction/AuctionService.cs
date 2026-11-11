@@ -24,7 +24,6 @@ public sealed class AuctionService : IAuctionService
 {
     private const int MaxReasonLength = 1000;
     private const int MaxTitleLength = 500;
-    private const int MaxOfferCandidates = 5;
     private const string PolicyConfigKey = "DEFAULT_AUCTION_POLICY";
     private static readonly TimeSpan SettlementIdempotencyLifetime = TimeSpan.FromDays(7);
     private static readonly TimeSpan WinnerPaymentWindow = TimeSpan.FromHours(24);
@@ -35,21 +34,16 @@ public sealed class AuctionService : IAuctionService
     private readonly IUserClient _users;
     private readonly TimeProvider _clock;
     private readonly IAuctionNotifier _notifier;
-    private readonly ICatalogSync _catalogSync;
-    private readonly ICommerceSync _commerceSync;
 
     /// <summary>Khởi tạo service với DbContext, các client gọi Catalog và User, đồng hồ hệ thống và bộ thông báo realtime.</summary>
     public AuctionService(
-        IAuctionDbContext dbContext, ICatalogClient catalog, IUserClient users, TimeProvider clock, IAuctionNotifier notifier,
-        ICatalogSync catalogSync, ICommerceSync commerceSync)
+        IAuctionDbContext dbContext, ICatalogClient catalog, IUserClient users, TimeProvider clock, IAuctionNotifier notifier)
     {
         _dbContext = dbContext;
         _catalog = catalog;
         _users = users;
         _clock = clock;
         _notifier = notifier;
-        _catalogSync = catalogSync;
-        _commerceSync = commerceSync;
     }
 
     // ------------------------------------------------------------------ Queries
@@ -116,228 +110,6 @@ public sealed class AuctionService : IAuctionService
         return new PagedData<AuctionStatusHistoryDto>(items, PaginationMetadata.Create(safePage, safePageSize, totalCount));
     }
 
-    // Trạng thái của từng bước trong saga (chuỗi hiển thị cho admin).
-    private const string StepCompleted = "Completed";
-    private const string StepInProgress = "InProgress";
-    private const string StepPending = "Pending";
-    private const string StepSkipped = "Skipped";
-    private const string StepFailed = "Failed";
-
-    /// <summary>
-    /// Admin xem tiến trình hậu đấu giá (saga) của một phiên: lên lịch, đấu giá, kết thúc, chốt kết quả, thanh toán qua Commerce,
-    /// mời bidder kế tiếp (nếu có) và trạng thái cuối. Dựng từ dữ liệu có sẵn (trạng thái, kết quả, settlement, lời mời), không có bảng saga riêng.
-    /// Trả kèm hạn đang chờ và cờ IsOverdue để admin phát hiện phiên bị kẹt (ví dụ Commerce chưa báo kết quả thanh toán).
-    /// Saga chỉ tồn tại sau khi đã chốt người thắng: phiên không tồn tại hoặc chưa có người thắng đều trả 404 AUCTION_NOT_FOUND.
-    /// </summary>
-    public async Task<AuctionSagaDto> GetSagaAsync(Guid auctionId, CancellationToken cancellationToken = default)
-    {
-        var now = _clock.GetUtcNow();
-
-        var auction = await _dbContext.Auctions
-            .AsNoTracking()
-            .Include(a => a.AuctionState)
-            .Include(a => a.AuctionResult)
-            .Include(a => a.AuctionSettlement)
-            .FirstOrDefaultAsync(a => a.Id == auctionId && !a.IsDeleted, cancellationToken);
-
-        var state = auction?.AuctionState;
-        var result = auction?.AuctionResult;
-        if (result is not null && result.IsDeleted)
-            result = null;
-
-        if (auction is null || state is null || result is null)
-            throw new DomainException("AUCTION_NOT_FOUND", "Auction was not found or has no winning saga.", 404);
-
-        var settlement = auction.AuctionSettlement;
-        if (settlement is not null && settlement.IsDeleted)
-            settlement = null;
-
-        // Mỗi phiên chỉ có tối đa một lời mời, lấy lời mời mới nhất cho chắc.
-        var offer = await _dbContext.AuctionWinnerOffers
-            .AsNoTracking()
-            .Where(o => o.AuctionId == auctionId && !o.IsDeleted)
-            .OrderByDescending(o => o.OfferedAt)
-            .FirstOrDefaultAsync(cancellationToken);
-
-        var status = state.Status;
-        var cancelled = status == AuctionStatus.Cancelled;
-        var isFinished = status is AuctionStatus.Settled or AuctionStatus.Failed or AuctionStatus.Cancelled;
-        var closed = state.EndedAt is not null;
-
-        var steps = new List<AuctionSagaStepDto>();
-
-        // 1. Lên lịch.
-        steps.Add(new AuctionSagaStepDto(
-            "Scheduled", StepCompleted, auction.CreatedAt, $"Scheduled start at {auction.ScheduledStartAt:O}."));
-
-        // 2. Đang đấu giá.
-        string biddingState;
-        if (state.StartedAt is null)
-            biddingState = cancelled ? StepSkipped : StepPending;
-        else if (status == AuctionStatus.Running)
-            biddingState = StepInProgress;
-        else if (cancelled && !closed)
-            biddingState = StepFailed;
-        else
-            biddingState = StepCompleted;
-
-        var currentPrice = state.CurrentPriceAmount.HasValue
-            ? state.CurrentPriceAmount.Value.ToString("0.##", CultureInfo.InvariantCulture)
-            : "none";
-        steps.Add(new AuctionSagaStepDto(
-            "Bidding", biddingState, state.StartedAt,
-            $"{state.BidCount} bid(s), {state.ExtensionCount} extension(s), current price {currentPrice}."));
-
-        // 3. Hết giờ.
-        string endedState;
-        if (closed)
-            endedState = StepCompleted;
-        else if (cancelled)
-            endedState = StepSkipped;
-        else if (status == AuctionStatus.Running)
-            endedState = StepInProgress;
-        else
-            endedState = StepPending;
-
-        steps.Add(new AuctionSagaStepDto(
-            "Ended", endedState, state.EndedAt,
-            closed ? "The auction time is over." : $"Scheduled end at {state.ScheduledEndAt:O}."));
-
-        // 4. Chốt kết quả (người thắng và giá chốt).
-        string resultState;
-        DateTimeOffset? resultAt = null;
-        string? resultDetail = null;
-        if (result is not null)
-        {
-            resultState = StepCompleted;
-            resultAt = result.DeterminedAt;
-            resultDetail = $"Winner {result.WinnerId}, final price {result.FinalPriceAmount}.";
-        }
-        else if (closed)
-        {
-            resultState = StepFailed;
-            resultDetail = "The auction ended without a winner.";
-        }
-        else if (cancelled)
-        {
-            resultState = StepSkipped;
-        }
-        else
-        {
-            resultState = StepPending;
-        }
-
-        steps.Add(new AuctionSagaStepDto("Result", resultState, resultAt, resultDetail));
-
-        // 5. Thanh toán qua Commerce.
-        string paymentState;
-        DateTimeOffset? paymentAt = null;
-        string? paymentDetail = null;
-        if (settlement is null)
-        {
-            paymentState = isFinished ? StepSkipped : StepPending;
-        }
-        else
-        {
-            switch (settlement.Status)
-            {
-                case AuctionSettlementStatus.PendingPayment:
-                    paymentState = StepInProgress;
-                    paymentDetail = $"Waiting for the payment of winner {settlement.WinnerId}, deadline {settlement.PaymentDeadlineAt:O}.";
-                    break;
-                case AuctionSettlementStatus.Paid:
-                    paymentState = StepCompleted;
-                    paymentAt = settlement.PaidAt;
-                    paymentDetail = $"Paid, order {settlement.OrderId}.";
-                    break;
-                default:
-                    paymentState = StepFailed;
-                    paymentDetail = $"Payment {settlement.Status}, order {settlement.OrderId}.";
-                    break;
-            }
-        }
-
-        steps.Add(new AuctionSagaStepDto("Payment", paymentState, paymentAt, paymentDetail));
-
-        // 6. Lời mời bidder kế tiếp (chỉ có khi thanh toán của người thắng trước không thành công).
-        if (offer is not null)
-        {
-            string offerState;
-            var offerAt = offer.RespondedAt;
-            switch (offer.Status)
-            {
-                case AuctionWinnerOfferStatus.Pending:
-                    offerState = StepInProgress;
-                    offerAt = offer.OfferedAt;
-                    break;
-                case AuctionWinnerOfferStatus.Accepted:
-                    offerState = StepCompleted;
-                    break;
-                default:
-                    offerState = StepFailed;
-                    offerAt ??= offer.ExpiresAt;
-                    break;
-            }
-
-            steps.Add(new AuctionSagaStepDto(
-                "Winner offer", offerState, offerAt,
-                $"Offer to bidder {offer.BidderId} for {offer.Amount}, status {offer.Status}, expires at {offer.ExpiresAt:O}."));
-        }
-
-        // 7. Trạng thái cuối của phiên.
-        var finalState = status switch
-        {
-            AuctionStatus.Settled => StepCompleted,
-            AuctionStatus.Failed or AuctionStatus.Cancelled => StepFailed,
-            _ => StepPending
-        };
-        steps.Add(new AuctionSagaStepDto(
-            "Final status", finalState, isFinished ? state.UpdatedAt : null, $"Auction status is {status}."));
-
-        // Bước hiện tại: bước đang chạy, không có thì bước chờ đầu tiên, không có nữa thì bước cuối.
-        var current = steps.FirstOrDefault(s => s.State == StepInProgress)
-            ?? steps.FirstOrDefault(s => s.State == StepPending)
-            ?? steps[^1];
-
-        // Đang chờ gì và hạn là bao giờ: quá hạn mà chưa xong nghĩa là phiên có thể bị kẹt.
-        string? waitingFor = null;
-        DateTimeOffset? deadlineAt = null;
-        if (status == AuctionStatus.Scheduled)
-        {
-            waitingFor = "Start time of the auction";
-            deadlineAt = auction.ScheduledStartAt;
-        }
-        else if (status == AuctionStatus.Running)
-        {
-            waitingFor = "End time of the auction";
-            deadlineAt = state.ScheduledEndAt;
-        }
-        else if (status == AuctionStatus.Ended)
-        {
-            if (offer is { Status: AuctionWinnerOfferStatus.Pending })
-            {
-                waitingFor = "Answer of the invited bidder";
-                deadlineAt = offer.ExpiresAt;
-            }
-            else if (settlement is { Status: AuctionSettlementStatus.PendingPayment })
-            {
-                waitingFor = "Payment result from Commerce";
-                deadlineAt = settlement.PaymentDeadlineAt;
-            }
-        }
-
-        var isOverdue = !isFinished && deadlineAt is not null && deadlineAt.Value < now;
-
-        // Saga bắt đầu khi settlement được tạo (hoặc khi chốt kết quả nếu chưa có settlement) và cập nhật theo lần thay đổi gần nhất của các phần liên quan.
-        var createdAt = settlement?.CreatedAt ?? result.CreatedAt;
-        var updatedAt = new[] { state.UpdatedAt, result.UpdatedAt, settlement?.UpdatedAt ?? createdAt, offer?.UpdatedAt ?? createdAt }.Max();
-
-        return new AuctionSagaDto(
-            auction.Id, "AuctionSettlement", current.Name,
-            new AuctionSagaStateData(auction.ProductId, auction.SellerId, status, isFinished, waitingFor, deadlineAt, isOverdue, steps),
-            createdAt, updatedAt);
-    }
-
     /// <summary>Lấy kết quả của phiên (người thắng, bid thắng, giá chốt). Trả 404 nếu phiên không tồn tại hoặc kết quả chưa được xác định.</summary>
     public async Task<AuctionResultDto> GetResultAsync(Guid auctionId, CancellationToken cancellationToken = default)
     {
@@ -371,10 +143,7 @@ public sealed class AuctionService : IAuctionService
     /// <summary>
     /// Tiếp nhận callback kết quả thanh toán từ Commerce cho phiên đã Ended.
     /// Kiểm tra dữ liệu đầu vào, dùng eventId làm khoá idempotent (gửi lại cùng nội dung thì trả kết quả cũ), đối chiếu người thắng, giá chốt và đơn hàng
-    /// với kết quả của phiên, tạo hoặc cập nhật settlement. Paid chuyển phiên sang Settled.
-    /// Expired hoặc Failed: nếu còn bidder hợp lệ kế tiếp (chưa từng có lời mời nào cho phiên này) thì tạo lời mời cho người đó và phiên vẫn ở Ended
-    /// chờ họ phản hồi; không có ai thì phiên chuyển sang Failed và nhả sản phẩm. Cancelled chuyển phiên sang Failed và nhả sản phẩm.
-    /// PaymentTimedOut xử lý như Expired. SellerAccepted, SellerRejected, SellerExpired (phiên đang Settled) xử lý ở HandleSellerDecisionAsync.
+    /// với kết quả của phiên, tạo hoặc cập nhật settlement. Paid chuyển phiên sang Settled, các trạng thái còn lại chuyển sang Failed.
     /// Ghi lịch sử trạng thái, audit và báo realtime AuctionStatusChanged cho người đang xem phiên.
     /// </summary>
     public async Task<SettlementPaymentStatusResponse> HandlePaymentStatusAsync(
@@ -435,15 +204,6 @@ public sealed class AuctionService : IAuctionService
             finalPrice != reportedAmount)
             throw new DomainException(
                 "PAYMENT_AMOUNT_MISMATCH", "The payment amount does not match the auction result.", 409);
-        // Quyết định của Seller (sau khi Buyer đã thanh toán, phiên đang Settled) xử lý riêng, không đi qua luồng thanh toán bên dưới.
-        if (paymentStatus is SettlementPaymentStatus.SellerAccepted
-            or SettlementPaymentStatus.SellerRejected
-            or SettlementPaymentStatus.SellerExpired)
-        {
-            return await HandleSellerDecisionAsync(
-                auction, orderId, winnerId, paymentStatus, eventId, requestHash, now, cancellationToken);
-        }
-
         if (state.Status != AuctionStatus.Ended)
             throw new DomainException(
                 "AUCTION_NOT_AWAITING_SETTLEMENT", "The auction is not awaiting settlement.", 409);
@@ -451,11 +211,6 @@ public sealed class AuctionService : IAuctionService
         if (auction.AuctionSettlement?.OrderId is { } existingOrderId && existingOrderId != orderId)
             throw new DomainException(
                 "ORDER_MISMATCH", "The reported order does not match the auction settlement.", 409);
-
-        // Commerce đã báo thanh toán không thành công và đang chờ bidder kế tiếp phản hồi lời mời: phiên vẫn Ended nhưng settlement không còn chờ thanh toán.
-        if (auction.AuctionSettlement is { Status: not AuctionSettlementStatus.PendingPayment })
-            throw new DomainException(
-                "AUCTION_NOT_AWAITING_SETTLEMENT", "The auction is not awaiting settlement.", 409);
 
         var previousStatus = state.Status;
         auction.AuctionSettlement ??= new AuctionSettlement
@@ -472,7 +227,7 @@ public sealed class AuctionService : IAuctionService
         auction.AuctionSettlement.Status = paymentStatus switch
         {
             SettlementPaymentStatus.Paid => AuctionSettlementStatus.Paid,
-            SettlementPaymentStatus.Expired or SettlementPaymentStatus.PaymentTimedOut => AuctionSettlementStatus.Expired,
+            SettlementPaymentStatus.Expired => AuctionSettlementStatus.Expired,
             SettlementPaymentStatus.Cancelled => AuctionSettlementStatus.Cancelled,
             _ => AuctionSettlementStatus.Failed
         };
@@ -481,63 +236,27 @@ public sealed class AuctionService : IAuctionService
             : null;
         auction.AuctionSettlement.UpdatedAt = now;
 
-        // Thanh toán Expired hoặc Failed: mời bidder hợp lệ kế tiếp (mỗi phiên chỉ có một lời mời). Không có ai thì phiên Failed như trước.
-        AuctionWinnerOffer? offer = null;
-        if (paymentStatus is SettlementPaymentStatus.Expired or SettlementPaymentStatus.PaymentTimedOut or SettlementPaymentStatus.Failed)
-            offer = await TryCreateWinnerOfferAsync(auctionId, winnerId, now, cancellationToken);
+        state.Status = paymentStatus == SettlementPaymentStatus.Paid
+            ? AuctionStatus.Settled
+            : AuctionStatus.Failed;
+        state.UpdatedAt = now;
+        state.RowVersion += 1;
 
-        if (offer is null)
+        _dbContext.AuctionStatusHistories.Add(new AuctionStatusHistory
         {
-            state.Status = paymentStatus == SettlementPaymentStatus.Paid
-                ? AuctionStatus.Settled
-                : AuctionStatus.Failed;
-            state.UpdatedAt = now;
-            state.RowVersion += 1;
-
-            // Thanh toán không thành công (Failed, Expired, Cancelled) mà không có bidder kế tiếp thì nhả sản phẩm để seller tạo lại phiên.
-            // Index unique theo ProductId bỏ qua xoá mềm nên phải xoá thật dòng này. Paid thì giữ nguyên vì sản phẩm đã bán.
-            if (paymentStatus != SettlementPaymentStatus.Paid)
-            {
-                var openAuction = await _dbContext.ProductOpenAuctions
-                    .FirstOrDefaultAsync(p => p.AuctionId == auctionId, cancellationToken);
-                if (openAuction is not null)
-                    _dbContext.ProductOpenAuctions.Remove(openAuction);
-            }
-
-            _dbContext.AuctionStatusHistories.Add(new AuctionStatusHistory
-            {
-                Id = Guid.NewGuid(),
-                AuctionId = auctionId,
-                FromStatus = previousStatus,
-                ToStatus = state.Status,
-                Reason = $"Commerce payment status: {paymentStatus}.",
-                ChangedAt = now,
-                CreatedAt = now,
-                UpdatedAt = now
-            });
-        }
-        else
-        {
-            // Phiên vẫn Ended và sản phẩm vẫn được giữ cho tới khi bidder kế tiếp phản hồi hoặc lời mời hết hạn.
-            state.UpdatedAt = now;
-
-            _dbContext.AddAuditLog(
-                AuditAction.WinnerOfferCreate, "Auction", auctionId.ToString(),
-                oldValues: new { winnerId, orderId, paymentStatus = paymentStatus.ToString() },
-                newValues: new
-                {
-                    offerId = offer.Id,
-                    bidderId = offer.BidderId,
-                    bidId = offer.BidId,
-                    amount = offer.Amount,
-                    expiresAt = offer.ExpiresAt
-                });
-        }
-
+            Id = Guid.NewGuid(),
+            AuctionId = auctionId,
+            FromStatus = previousStatus,
+            ToStatus = state.Status,
+            Reason = $"Commerce payment status: {paymentStatus}.",
+            ChangedAt = now,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
         _dbContext.AddAuditLog(
             AuditAction.AuctionSettle, "Auction", auctionId.ToString(),
             oldValues: new { status = previousStatus.ToString(), orderId },
-            newValues: new { status = state.Status.ToString(), orderId, paymentStatus = paymentStatus.ToString(), offerId = offer?.Id });
+            newValues: new { status = state.Status.ToString(), orderId, paymentStatus = paymentStatus.ToString() });
 
         var response = new SettlementPaymentStatusResponse(
             auctionId, orderId, winnerId, previousStatus, state.Status, paymentStatus, now);
@@ -556,125 +275,9 @@ public sealed class AuctionService : IAuctionService
 
         await SaveAsync(null, cancellationToken);
 
-        // Đã lưu: báo trạng thái mới (Settled hoặc Failed) cho người đang xem phiên. Tạo lời mời thì phiên vẫn Ended nên không báo.
-        // Callback gửi lại đã return ở nhánh idempotent nên không báo trùng.
-        if (offer is null)
-        {
-            // Đã thanh toán thì chưa gọi Catalog: chờ Seller chấp nhận (SellerAccepted) mới chốt bán. Thất bại, hết hạn hoặc huỷ mà không còn bidder kế tiếp thì mở khoá.
-            if (paymentStatus != SettlementPaymentStatus.Paid)
-                _catalogSync.UnlockProduct(auction.ProductId, auctionId);
-
-            await _notifier.AuctionStatusChangedAsync(
-                auctionId, new AuctionStatusChangedMessage(auctionId, state.Status.ToString(), now), CancellationToken.None);
-        }
-
-        return response;
-    }
-
-    /// <summary>
-    /// Xử lý quyết định của Seller do Commerce báo sau khi Buyer đã thanh toán (phiên đang Settled, settlement Paid).
-    /// SellerAccepted: phiên giữ Settled, chốt bán sản phẩm ở Catalog (Auctioned, vĩnh viễn). SellerRejected hoặc SellerExpired: phiên chuyển Failed,
-    /// settlement Cancelled, nhả sản phẩm ở Auction và mở khoá ở Catalog; không mời bidder kế tiếp vì lỗi do Seller.
-    /// Seller đã chấp nhận thì không còn từ chối được (Catalog đã chốt Auctioned và không mở khoá được). Gọi lại SellerAccepted là an toàn.
-    /// </summary>
-    private async Task<SettlementPaymentStatusResponse> HandleSellerDecisionAsync(
-        AuctionEntity auction, Guid orderId, Guid winnerId, SettlementPaymentStatus decision,
-        string eventId, string requestHash, DateTimeOffset now, CancellationToken cancellationToken)
-    {
-        var auctionId = auction.Id;
-        var state = auction.AuctionState!;
-        var settlement = auction.AuctionSettlement;
-
-        if (state.Status != AuctionStatus.Settled || settlement is null || settlement.Status != AuctionSettlementStatus.Paid)
-            throw new DomainException(
-                "AUCTION_NOT_AWAITING_SETTLEMENT", "The auction is not awaiting the seller's decision.", 409);
-        if (settlement.OrderId != orderId)
-            throw new DomainException(
-                "ORDER_MISMATCH", "The reported order does not match the auction settlement.", 409);
-
-        // Phiên không lưu riêng việc Seller đã chấp nhận, nên tra dấu vết audit để không cho từ chối sau khi đã chấp nhận.
-        var auctionIdText = auctionId.ToString();
-        var alreadyAccepted = await _dbContext.AuditLogs
-            .AsNoTracking()
-            .AnyAsync(a => a.Action == AuditAction.SellerAccept && a.EntityName == "Auction" && a.EntityId == auctionIdText, cancellationToken);
-
-        var previousStatus = state.Status;
-        if (decision == SettlementPaymentStatus.SellerAccepted)
-        {
-            if (!alreadyAccepted)
-            {
-                _dbContext.AddAuditLog(
-                    AuditAction.SellerAccept, "Auction", auctionIdText,
-                    oldValues: new { status = previousStatus.ToString(), orderId },
-                    newValues: new { status = previousStatus.ToString(), orderId, sellerDecision = decision.ToString() });
-            }
-        }
-        else
-        {
-            if (alreadyAccepted)
-                throw new DomainException(
-                    "SELLER_ALREADY_ACCEPTED", "The seller already accepted this order and it cannot be rejected anymore.", 409);
-
-            settlement.Status = AuctionSettlementStatus.Cancelled;
-            settlement.UpdatedAt = now;
-
-            state.Status = AuctionStatus.Failed;
-            state.UpdatedAt = now;
-            state.RowVersion += 1;
-
-            // Nhả sản phẩm để seller tạo lại phiên. Index unique theo ProductId bỏ qua xoá mềm nên phải xoá thật dòng này.
-            var openAuction = await _dbContext.ProductOpenAuctions
-                .FirstOrDefaultAsync(p => p.AuctionId == auctionId, cancellationToken);
-            if (openAuction is not null)
-                _dbContext.ProductOpenAuctions.Remove(openAuction);
-
-            _dbContext.AuctionStatusHistories.Add(new AuctionStatusHistory
-            {
-                Id = Guid.NewGuid(),
-                AuctionId = auctionId,
-                FromStatus = previousStatus,
-                ToStatus = state.Status,
-                Reason = decision == SettlementPaymentStatus.SellerRejected
-                    ? "The seller rejected the order."
-                    : "The seller did not respond to the order in time.",
-                ChangedAt = now,
-                CreatedAt = now,
-                UpdatedAt = now
-            });
-            _dbContext.AddAuditLog(
-                AuditAction.AuctionSettle, "Auction", auctionIdText,
-                oldValues: new { status = previousStatus.ToString(), orderId },
-                newValues: new { status = state.Status.ToString(), orderId, sellerDecision = decision.ToString() });
-        }
-
-        var response = new SettlementPaymentStatusResponse(
-            auctionId, orderId, winnerId, previousStatus, state.Status, decision, now);
-        _dbContext.IdempotencyKeys.Add(new IdempotencyKey
-        {
-            Id = Guid.NewGuid(),
-            Key = eventId,
-            Scope = IdempotencyScope.Settlement,
-            RequestHash = requestHash,
-            ResponseStatus = 200,
-            ResponseBody = JsonSerializer.Serialize(response, JsonOptions),
-            ExpiresAt = now.Add(SettlementIdempotencyLifetime),
-            CreatedAt = now,
-            UpdatedAt = now
-        });
-
-        await SaveAsync(null, cancellationToken);
-
-        // Đã lưu. Chấp nhận: chốt bán ở Catalog. Từ chối hoặc quá hạn: mở khoá ở Catalog rồi báo realtime phiên đã Failed.
-        if (decision == SettlementPaymentStatus.SellerAccepted)
-        {
-            _catalogSync.MarkProductAuctioned(auction.ProductId, auctionId);
-        }
-        else
-        {
-            _catalogSync.UnlockProduct(auction.ProductId, auctionId);
-            await _notifier.AuctionStatusChangedAsync(
-                auctionId, new AuctionStatusChangedMessage(auctionId, state.Status.ToString(), now), CancellationToken.None);
-        }
+        // Đã lưu: báo trạng thái mới (Settled hoặc Failed) cho người đang xem phiên. Callback gửi lại đã return ở nhánh idempotent nên không báo trùng.
+        await _notifier.AuctionStatusChangedAsync(
+            auctionId, new AuctionStatusChangedMessage(auctionId, state.Status.ToString(), now), CancellationToken.None);
 
         return response;
     }
@@ -887,9 +490,7 @@ public sealed class AuctionService : IAuctionService
         // 1. Input checks (no database, no other service).
         if (request.SkuId is not { } skuId || skuId == Guid.Empty)
             throw Invalid("VAL_INVALID_IDENTIFIER", "SKU ID is required.");
-        AuctionRules.ValidateStartPrice(request.StartPriceAmount);
-        if (request.BidStepAmount is not null)
-            AuctionRules.ValidateBidStep(request.BidStepAmount);
+        AuctionRules.ValidatePrices(request.StartPriceAmount, request.BidStepAmount);
         AuctionRules.ValidateSchedule(request.ScheduledStartAt, request.ScheduledEndAt, now);
 
         // 2. User service: the caller must be an approved seller with enough reputation.
@@ -903,12 +504,9 @@ public sealed class AuctionService : IAuctionService
         var title = eligible.Title;
         var policy = await GetPolicyAsync(cancellationToken);
 
-        // Seller không nhập bước giá thì dùng % mặc định của giá khởi điểm (Admin cấu hình); số tiền được lưu cố định vào phiên.
-        var bidStep = AuctionRules.ResolveBidStep(request.StartPriceAmount, request.BidStepAmount, policy.DefaultBidStepPercent);
-
         var created = NewAuction(
             actor.UserId, productId, skuId, title, recreatedFromAuctionId: null,
-            request.StartPriceAmount!.Value, bidStep,
+            request.StartPriceAmount!.Value, request.BidStepAmount!.Value,
             request.ScheduledStartAt!.Value, request.ScheduledEndAt!.Value, policy, now);
 
         _dbContext.Auctions.Add(created.Auction);
@@ -918,18 +516,7 @@ public sealed class AuctionService : IAuctionService
             newValues: Snapshot(created.Auction, AuctionStatus.Scheduled),
             userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
 
-        // Giữ sản phẩm ở Catalog (InAuction) và tạo phiên cùng thành công hoặc cùng thất bại: khoá trước, lưu phiên sau.
-        await _catalog.LockProductForAuctionAsync(productId, cancellationToken);
-        try
-        {
-            await SaveAsync(productId, cancellationToken);
-        }
-        catch
-        {
-            // Lưu phiên thất bại: mở khoá lại sản phẩm (gửi nền, có thử lại).
-            _catalogSync.UnlockProduct(productId, created.Auction.Id);
-            throw;
-        }
+        await SaveAsync(productId, cancellationToken);
 
         var a = created.Auction;
         return new AuctionCreatedResponse(
@@ -1061,10 +648,7 @@ public sealed class AuctionService : IAuctionService
 
         await SaveAsync(null, cancellationToken);
 
-        // Phiên đã được huỷ và lưu: mở khoá sản phẩm ở Catalog (gửi nền, có thử lại).
-        _catalogSync.UnlockProduct(auction.ProductId, auction.Id);
-
-        // Báo cho người đang xem phiên để họ dừng đặt giá.
+        // Phiên đã được huỷ và lưu: báo cho người đang xem phiên để họ dừng đặt giá.
         await _notifier.AuctionCancelledAsync(
             auction.Id, new AuctionCancelledMessage(auction.Id, now), CancellationToken.None);
 
@@ -1130,10 +714,7 @@ public sealed class AuctionService : IAuctionService
 
         await SaveAsync(null, cancellationToken);
 
-        // Phiên đã bị huỷ và lưu: mở khoá sản phẩm ở Catalog (gửi nền, có thử lại).
-        _catalogSync.UnlockProduct(auction.ProductId, auction.Id);
-
-        // Báo cho người đang xem phiên để họ dừng đặt giá. Không trừ uy tín seller.
+        // Phiên đã bị huỷ và lưu: báo cho người đang xem phiên để họ dừng đặt giá. Không trừ uy tín seller.
         await _notifier.AuctionCancelledAsync(
             auction.Id, new AuctionCancelledMessage(auction.Id, now), CancellationToken.None);
 
@@ -1216,9 +797,6 @@ public sealed class AuctionService : IAuctionService
 
         await SaveAsync(null, cancellationToken);
 
-        // Người thắng mới đã nhận lời mời: đẩy settlement mới sang Commerce để tạo đơn (gửi nền, có thử lại).
-        _commerceSync.PushSettlement(auctionId);
-
         return new WinnerOfferResponse(
             offer.Id, auctionId, offer.Status, state.Status, offer.Amount, now, paymentDeadline);
     }
@@ -1277,9 +855,7 @@ public sealed class AuctionService : IAuctionService
 
         await SaveAsync(null, cancellationToken);
 
-        // Đã lưu: mở khoá sản phẩm ở Catalog (gửi nền, có thử lại), rồi báo cho người đang xem phiên rằng phiên đã chuyển sang Failed.
-        _catalogSync.UnlockProduct(auction.ProductId, auctionId);
-
+        // Đã lưu: báo cho người đang xem phiên rằng phiên đã chuyển sang Failed.
         await _notifier.AuctionStatusChangedAsync(
             auctionId, new AuctionStatusChangedMessage(auctionId, state.Status.ToString(), now), CancellationToken.None);
 
@@ -1408,9 +984,7 @@ public sealed class AuctionService : IAuctionService
     {
         var now = _clock.GetUtcNow();
 
-        AuctionRules.ValidateStartPrice(request.StartPriceAmount);
-        if (request.BidStepAmount is not null)
-            AuctionRules.ValidateBidStep(request.BidStepAmount);
+        AuctionRules.ValidatePrices(request.StartPriceAmount, request.BidStepAmount);
         AuctionRules.ValidateSchedule(request.ScheduledStartAt, request.ScheduledEndAt, now);
 
         var source = await LoadForWriteAsync(auctionId, cancellationToken);
@@ -1430,11 +1004,10 @@ public sealed class AuctionService : IAuctionService
             throw NotEligible("The SKU no longer belongs to the product of the original auction.");
         var title = eligible.Title;
         var policy = await GetPolicyAsync(cancellationToken);
-        var bidStep = AuctionRules.ResolveBidStep(request.StartPriceAmount, request.BidStepAmount, policy.DefaultBidStepPercent);
 
         var created = NewAuction(
             actor.UserId, source.ProductId, source.SkuId, title ?? source.SnapshotProductTitle, source.Id,
-            request.StartPriceAmount!.Value, bidStep,
+            request.StartPriceAmount!.Value, request.BidStepAmount!.Value,
             request.ScheduledStartAt!.Value, request.ScheduledEndAt!.Value, policy, now);
 
         _dbContext.Auctions.Add(created.Auction);
@@ -1444,18 +1017,7 @@ public sealed class AuctionService : IAuctionService
             newValues: Snapshot(created.Auction, AuctionStatus.Scheduled),
             userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
 
-        // Giữ sản phẩm ở Catalog (InAuction) và tạo phiên cùng thành công hoặc cùng thất bại: khoá trước, lưu phiên sau.
-        await _catalog.LockProductForAuctionAsync(source.ProductId, cancellationToken);
-        try
-        {
-            await SaveAsync(source.ProductId, cancellationToken);
-        }
-        catch
-        {
-            // Lưu phiên thất bại: mở khoá lại sản phẩm (gửi nền, có thử lại).
-            _catalogSync.UnlockProduct(source.ProductId, created.Auction.Id);
-            throw;
-        }
+        await SaveAsync(source.ProductId, cancellationToken);
 
         var a = created.Auction;
         return new AuctionRecreatedResponse(
@@ -1662,23 +1224,10 @@ public sealed class AuctionService : IAuctionService
         using var document = JsonDocument.Parse(config.ConfigValue);
         var root = document.RootElement;
 
-        // Only the anti-sniping settings and the default bid step are read. Reputation settings belong to the User service.
+        // Only the anti-sniping settings are read. Reputation settings belong to the User service.
         return new AuctionPolicy(
             ReadInt(root, "antiSnipingExtensionMinutes"),
-            ReadInt(root, "maxExtensionCount"),
-            ReadOptionalPercent(root, "defaultBidStepPercent", AuctionRules.FallbackDefaultBidStepPercent));
-    }
-
-    /// <summary>Đọc một số phần trăm (lớn hơn 0 và tối đa 100) theo tên từ JSON cấu hình. Thiếu trường thì dùng giá trị mặc định; có nhưng sai thì ném lỗi cấu hình không hợp lệ.</summary>
-    private static decimal ReadOptionalPercent(JsonElement root, string name, decimal fallback)
-    {
-        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty(name, out var value))
-            return fallback;
-
-        if (value.ValueKind == JsonValueKind.Number && value.TryGetDecimal(out var percent) && percent > 0m && percent <= 100m)
-            return percent;
-
-        throw new InvalidOperationException($"Auction policy configuration is invalid: '{name}' must be a number above 0 and at most 100.");
+            ReadInt(root, "maxExtensionCount"));
     }
 
     /// <summary>Đọc một số nguyên theo tên từ JSON cấu hình. Thiếu hoặc sai kiểu thì ném lỗi cấu hình không hợp lệ.</summary>
@@ -1849,61 +1398,6 @@ public sealed class AuctionService : IAuctionService
         return (auction, offer);
     }
 
-    /// <summary>
-    /// Tìm bidder hợp lệ kế tiếp để mời mua thay người thắng trước và thêm lời mời Pending vào DbContext (chưa lưu).
-    /// Mỗi phiên chỉ có một lời mời (chỉ mục unique theo AuctionId), nên phiên đã từng có lời mời thì trả null.
-    /// Người được xét là bidder khác người thắng trước, mỗi người tính bid hợp lệ cao nhất của họ (bằng giá thì bid đến trước), từ cao xuống thấp,
-    /// tối đa MaxOfferCandidates người; người đầu tiên được User service xác nhận còn đủ điều kiện sẽ nhận lời mời theo giá bid đó, hạn phản hồi 24 giờ.
-    /// User service không trả lời thì ném lỗi 503 và không lưu gì, Commerce gửi lại callback với cùng eventId. Không có ai đủ điều kiện thì trả null.
-    /// </summary>
-    private async Task<AuctionWinnerOffer?> TryCreateWinnerOfferAsync(
-        Guid auctionId, Guid previousWinnerId, DateTimeOffset now, CancellationToken cancellationToken)
-    {
-        var alreadyOffered = await _dbContext.AuctionWinnerOffers
-            .AnyAsync(o => o.AuctionId == auctionId, cancellationToken);
-        if (alreadyOffered)
-            return null;
-
-        var bids = await _dbContext.BidHistories
-            .AsNoTracking()
-            .Where(h => h.AuctionId == auctionId && !h.IsInvalidated && !h.IsDeleted && h.BidderId != previousWinnerId)
-            .OrderByDescending(h => h.Amount)
-            .ThenBy(h => h.SequenceNo)
-            .Select(h => new { h.BidId, h.BidderId, h.Amount })
-            .ToListAsync(cancellationToken);
-
-        var candidates = bids
-            .GroupBy(b => b.BidderId)
-            .Select(g => g.First())
-            .Take(MaxOfferCandidates)
-            .ToList();
-
-        foreach (var candidate in candidates)
-        {
-            var eligibility = await _users.VerifyBidEligibilityAsync(candidate.BidderId, cancellationToken);
-            if (!eligibility.Eligible)
-                continue;
-
-            var offer = new AuctionWinnerOffer
-            {
-                Id = Guid.NewGuid(),
-                AuctionId = auctionId,
-                BidId = candidate.BidId,
-                BidderId = candidate.BidderId,
-                Amount = candidate.Amount,
-                Status = AuctionWinnerOfferStatus.Pending,
-                OfferedAt = now,
-                ExpiresAt = now.AddHours(AuctionRules.WinnerOfferWindowHours),
-                CreatedAt = now,
-                UpdatedAt = now
-            };
-            _dbContext.AuctionWinnerOffers.Add(offer);
-            return offer;
-        }
-
-        return null;
-    }
-
     /// <summary>Đổi chuỗi tên trạng thái lời mời thành AuctionWinnerOfferStatus. Chuỗi rỗng trả null (không lọc); chỉ nhận tên, không nhận số; sai thì ném 400 VAL_INVALID_STATUS.</summary>
     private static AuctionWinnerOfferStatus? ParseOfferStatus(string? text)
     {
@@ -2009,5 +1503,5 @@ public sealed class AuctionService : IAuctionService
     }
 
     /// <summary>Cấu hình chống bắn tỉa dùng khi tạo phiên: số phút gia hạn mỗi lần và số lần gia hạn tối đa.</summary>
-    private sealed record AuctionPolicy(int AntiSnipingExtensionMinutes, int MaxExtensionCount, decimal DefaultBidStepPercent);
+    private sealed record AuctionPolicy(int AntiSnipingExtensionMinutes, int MaxExtensionCount);
 }

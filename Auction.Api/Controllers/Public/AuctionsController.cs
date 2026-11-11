@@ -3,7 +3,6 @@ namespace Auction.Api.Controllers;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using Auction.Api.Common;
 using Auction.Api.Extensions;
 using Auction.Application.Common.Models;
 using Auction.Application.Services.Auction;
@@ -69,7 +68,7 @@ public class AuctionsController : ControllerBase
     }
 
     /// <summary>Seller cancels their own auction before it starts. The reason is optional.</summary>
-    [HttpPost("{id:guid}/cancel")]
+    [HttpDelete("{id:guid}/cancel")]
     [ProducesResponseType(typeof(AuctionCancelledResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> Cancel(
         [FromRoute] Guid id,
@@ -240,21 +239,8 @@ public class AuctionsController : ControllerBase
         return Ok(result);
     }
 
-    /// <summary>Admin xem tiến trình hậu đấu giá (saga) của một phiên: các bước, bước hiện tại, hạn đang chờ và cờ quá hạn.</summary>
-    [HttpGet("~/api/v1/admin/auctions/{id:guid}/saga")]
-    [ProducesResponseType(typeof(AuctionSagaDto), StatusCodes.Status200OK)]
-    public async Task<IActionResult> GetSaga([FromRoute] Guid id, CancellationToken ct)
-    {
-        if (!this.TryGetUserId(out _, out var errorResult)) return errorResult;
-        if (!this.EnsureAdmin(out var adminError)) return adminError;
-
-        var result = await _auctionService.GetSagaAsync(id, ct);
-        return Ok(result);
-    }
-
-    /// <summary>Tiếp nhận kết quả thanh toán và quyết định của Seller từ Commerce cho một phiên đấu giá (Paid, SellerAccepted, SellerRejected, SellerExpired, PaymentTimedOut...).</summary>
+    /// <summary>Tiếp nhận kết quả thanh toán từ Commerce cho một phiên đấu giá đã kết thúc.</summary>
     [HttpPost("{id:guid}/settlement/payment-status")]
-    [RequireInternalServiceKey]
     [ProducesResponseType(typeof(SettlementPaymentStatusResponse), StatusCodes.Status200OK)]
     public async Task<ActionResult<SettlementPaymentStatusResponse>> HandlePaymentStatus(
         [FromRoute] Guid id, [FromBody] SettlementPaymentStatusRequest request, CancellationToken ct)

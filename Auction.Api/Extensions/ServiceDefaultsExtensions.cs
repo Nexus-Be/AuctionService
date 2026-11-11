@@ -109,7 +109,7 @@ public static class ServiceDefaultsExtensions
             });
 
             // options.OperationFilter<InternalOperationFilter>();
-            options.OperationFilter<global::Auction.Api.Swagger.DevUserHeadersOperationFilter>();
+
             var xmlDocumentationPath = Path.Combine(
                 AppContext.BaseDirectory,
                 $"{typeof(ServiceDefaultsExtensions).Assembly.GetName().Name}.xml");

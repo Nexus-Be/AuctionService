@@ -29,17 +29,14 @@ public sealed class BidService : IBidService
     private readonly IUserClient _users;
     private readonly TimeProvider _clock;
     private readonly IAuctionNotifier _notifier;
-    private readonly INotificationClient _notifications;
 
-    /// <summary>Khởi tạo service với DbContext, User client, đồng hồ hệ thống, bộ thông báo realtime và client gửi thông báo sang Notification service.</summary>
-    public BidService(
-        IAuctionDbContext dbContext, IUserClient users, TimeProvider clock, IAuctionNotifier notifier, INotificationClient notifications)
+    /// <summary>Khởi tạo service với DbContext, User client, đồng hồ hệ thống và bộ thông báo realtime.</summary>
+    public BidService(IAuctionDbContext dbContext, IUserClient users, TimeProvider clock, IAuctionNotifier notifier)
     {
         _dbContext = dbContext;
         _users = users;
         _clock = clock;
         _notifier = notifier;
-        _notifications = notifications;
     }
 
     // ------------------------------------------------------------------ History
@@ -210,9 +207,6 @@ public sealed class BidService : IBidService
         var previousWinner = await _dbContext.BidHistories
             .Where(h => h.AuctionId == auctionId && h.IsWinning)
             .ToListAsync(cancellationToken);
-
-        // Người đang dẫn đầu trước lượt này (nếu có) sẽ nhận thông báo bị vượt giá sau khi lượt đặt giá được lưu.
-        var outbidBid = previousWinner.OrderByDescending(h => h.Amount).FirstOrDefault();
         foreach (var history in previousWinner)
         {
             history.IsWinning = false;
@@ -340,15 +334,6 @@ public sealed class BidService : IBidService
                 state.BidCount, now, state.ScheduledEndAt, state.ExtensionCount,
                 previousPriceAmount, state.RowVersion),
             CancellationToken.None);
-
-        // Báo cho người vừa bị vượt giá qua Notification service (gửi nền, không chờ, lỗi chỉ ghi log).
-        // Lượt đầu tiên không có ai bị vượt, và người dẫn đầu tự nâng giá của mình thì không cần báo.
-        if (outbidBid is not null && outbidBid.BidderId != actor.UserId)
-        {
-            _notifications.NotifyBidOutbid(new BidOutbidNotification(
-                auctionId, auction.SnapshotProductTitle, bid.Id, outbidBid.BidId, outbidBid.BidderId,
-                actor.UserId, auction.SellerId, outbidBid.Amount, amount, now, state.ScheduledEndAt, actor.TraceId));
-        }
 
         return response;
     }
