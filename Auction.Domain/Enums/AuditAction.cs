@@ -12,5 +12,8 @@ public enum AuditAction
     WinnerOfferAccept = 7,
     WinnerOfferDecline = 8,
     AuctionStart = 9,
-    AuctionEnd = 10
+    AuctionEnd = 10,
+    WinnerOfferCreate = 11,
+    WinnerOfferExpire = 12,
+    SellerAccept = 13
 }

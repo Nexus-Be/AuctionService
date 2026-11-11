@@ -13,6 +13,7 @@ public sealed class CatalogClient : ICatalogClient
     private const string CheckStatusPath = "/api/v1/internal/variants/check-status";
     private const string VariantsPath = "/api/v1/internal/variants";
     private const string ProductPath = "/api/v1/catalog/products/";
+    private const string InternalProductPath = "/api/v1/internal/products/";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -78,22 +79,120 @@ public sealed class CatalogClient : ICatalogClient
                 return null;
 
             var data = await ReadAsync<ProductData>(response, cancellationToken);
-            if (data.Id != productId)
+
+            // Catalog trả mã sản phẩm ở trường productId (bản cũ dùng id).
+            var returnedId = data.ProductId ?? data.Id ?? Guid.Empty;
+            if (returnedId != productId)
                 throw InvalidResponse("a product with a different id");
 
+            // Chỉ lấy ảnh đang hoạt động (isActive không có thì coi là đang hoạt động).
             var images = (data.Images ?? new List<ImageItem>())
-                .Where(i => !string.IsNullOrWhiteSpace(i.Url))
+                .Where(i => !string.IsNullOrWhiteSpace(i.Url) && i.IsActive != false)
                 .OrderBy(i => i.SortOrder)
                 .Select(i => new CatalogImage(i.Url!, i.SortOrder))
                 .ToList();
 
-            return new CatalogProductDetail(data.Id, data.Name, data.Description, data.Specifications, images);
+            return new CatalogProductDetail(returnedId, data.Name, data.Description, SpecificationsToJson(data.Specifications), images);
         }
         catch (Exception ex) when (IsTransportFailure(ex, cancellationToken))
         {
             throw Unavailable(ex);
         }
     }
+
+    public async Task LockProductForAuctionAsync(Guid productId, CancellationToken cancellationToken = default)
+    {
+        var (status, code) = await PostProductCommandAsync(productId, "lock-auction", cancellationToken);
+        if (status is >= 200 and < 300)
+            return;
+
+        throw code switch
+        {
+            "PRODUCT_ALREADY_IN_AUCTION" => new DomainException(
+                "PRODUCT_ALREADY_IN_AUCTION", "The product is already locked in another auction.", 409),
+            "PRODUCT_ALREADY_AUCTIONED" => new DomainException(
+                "PRODUCT_ALREADY_AUCTIONED", "The product has already been auctioned and cannot be put into auction again.", 409),
+            "VAL_INVALID_INPUT" or "PRODUCT_NOT_FOUND" => new DomainException(
+                "PRODUCT_NOT_ELIGIBLE", "The product cannot be put into auction.", 422),
+            _ => status >= 500
+                ? Unavailable(new HttpRequestException($"Catalog answered HTTP {status} to lock-auction."))
+                : InvalidResponse($"lock-auction answered HTTP {status} ({code})")
+        };
+    }
+
+    public async Task UnlockProductFromAuctionAsync(Guid productId, CancellationToken cancellationToken = default)
+    {
+        var (status, code) = await PostProductCommandAsync(productId, "unlock-auction", cancellationToken);
+        if (status is >= 200 and < 300)
+            return;
+
+        // Sản phẩm không còn InAuction (đã được mở khoá trước đó) hoặc không còn tồn tại: không còn gì để mở khoá.
+        if (code is "PRODUCT_NOT_IN_AUCTION" or "PRODUCT_NOT_FOUND")
+        {
+            _logger.LogInformation("Product {ProductId} was already unlocked in Catalog ({Code}).", productId, code);
+            return;
+        }
+
+        throw status >= 500
+            ? Unavailable(new HttpRequestException($"Catalog answered HTTP {status} to unlock-auction."))
+            : InvalidResponse($"unlock-auction answered HTTP {status} ({code})");
+    }
+
+    public async Task MarkProductAuctionedAsync(Guid productId, CancellationToken cancellationToken = default)
+    {
+        var (status, code) = await PostProductCommandAsync(productId, "mark-auctioned", cancellationToken);
+        if (status is >= 200 and < 300)
+            return;
+
+        throw status >= 500
+            ? Unavailable(new HttpRequestException($"Catalog answered HTTP {status} to mark-auctioned."))
+            : InvalidResponse($"mark-auctioned answered HTTP {status} ({code})");
+    }
+
+    /// <summary>Gọi một lệnh không có body của sản phẩm (lock-auction, unlock-auction, mark-auctioned). Trả mã HTTP và errorCode của Catalog (nếu có).</summary>
+    private async Task<(int Status, string? ErrorCode)> PostProductCommandAsync(
+        Guid productId, string command, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var response = await _http.PostAsync($"{InternalProductPath}{productId}/{command}", null, cancellationToken);
+            var status = (int)response.StatusCode;
+            if (response.IsSuccessStatusCode)
+                return (status, null);
+
+            string? code = null;
+            try
+            {
+                var text = await response.Content.ReadAsStringAsync(cancellationToken);
+                using var document = JsonDocument.Parse(text);
+                if (document.RootElement.ValueKind == JsonValueKind.Object
+                    && document.RootElement.TryGetProperty("errorCode", out var errorCode)
+                    && errorCode.ValueKind == JsonValueKind.String)
+                {
+                    code = errorCode.GetString();
+                }
+            }
+            catch (JsonException)
+            {
+                // Catalog không trả JSON: chỉ còn mã HTTP.
+            }
+
+            return (status, code);
+        }
+        catch (Exception ex) when (IsTransportFailure(ex, cancellationToken))
+        {
+            throw Unavailable(ex);
+        }
+    }
+
+    /// <summary>Catalog trả thông số dạng danh sách (hoặc đối tượng) JSON; đổi về chuỗi JSON để Auction giữ nguyên cấu trúc. Bản cũ trả sẵn chuỗi thì dùng luôn.</summary>
+    private static string? SpecificationsToJson(JsonElement? specifications) =>
+        specifications switch
+        {
+            { ValueKind: JsonValueKind.Array or JsonValueKind.Object } value => value.GetRawText(),
+            { ValueKind: JsonValueKind.String } value => value.GetString(),
+            _ => null
+        };
 
     private async Task<T> PostAsync<T>(string path, VariantQuery body, CancellationToken cancellationToken)
     {
@@ -163,8 +262,8 @@ public sealed class CatalogClient : ICatalogClient
     private sealed record VariantItem(
         Guid VariantId, Guid ProductId, Guid SellerId, string? ProductName, string? PrimaryImageUrl);
 
-    private sealed record ImageItem(string? Url, int SortOrder);
+    private sealed record ImageItem(string? Url, int SortOrder, bool? IsActive = null);
 
     private sealed record ProductData(
-        Guid Id, string? Name, string? Description, string? Specifications, List<ImageItem>? Images);
+        Guid? ProductId, Guid? Id, string? Name, string? Description, JsonElement? Specifications, List<ImageItem>? Images);
 }

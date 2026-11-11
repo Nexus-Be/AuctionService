@@ -53,7 +53,7 @@ public class AuctionConfigsController : ControllerBase
         return Ok(result);
     }
 
-    /// <summary>Admin publishes a new version of the anti-sniping settings. Only auctions created afterwards use the new values.</summary>
+    /// <summary>Admin publishes a new version of the auction policy (anti-sniping settings and the default bid step percent). Only auctions created afterwards use the new values.</summary>
     [HttpPut]
     [ProducesResponseType(typeof(AuctionConfigDto), StatusCodes.Status200OK)]
     public async Task<IActionResult> Update([FromBody] UpdateAuctionConfigRequest request, CancellationToken ct)
@@ -65,4 +65,4 @@ public class AuctionConfigsController : ControllerBase
         var result = await _configService.UpdateAsync(actor, request, ct);
         return Ok(result);
     }
-}   
+}

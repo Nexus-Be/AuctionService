@@ -6,6 +6,7 @@ using Auction.Application;
 using Auction.Application.Interfaces;
 using Auction.Infrastructure;
 using Auction.Infrastructure.Clients;
+using Auction.Infrastructure.Notifications;
 using Auction.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -70,15 +71,65 @@ builder.Services.AddHttpClient<ICatalogClient, CatalogClient>(client =>
         client.DefaultRequestHeaders.Add("X-Internal-Service-Key", internalServiceKey);
 });
 
-builder.Services.AddSingleton(new UserClientOptions(bypassUserCheck));
+// Timeout gọi User service cấu hình được (mili giây): User:TimeoutMs (mặc định 2000) cho check-reputation và batch-public-info,
+// User:BidTimeoutMs (mặc định 800) cho verify-bid-eligibility. Khi test local với DB từ xa có thể tăng, ví dụ 8000 và 3000.
+TimeSpan? ReadTimeout(string key) =>
+    int.TryParse(builder.Configuration[key], out var ms) && ms > 0 ? TimeSpan.FromMilliseconds(ms) : null;
+
+builder.Services.AddSingleton(new UserClientOptions(
+    bypassUserCheck, ReadTimeout("User:TimeoutMs"), ReadTimeout("User:BidTimeoutMs")));
 builder.Services.AddHttpClient<IUserClient, UserClient>(client =>
 {
     client.BaseAddress = new Uri(builder.Configuration["User:BaseUrl"] ?? "http://localhost:8001");
-    client.Timeout = TimeSpan.FromSeconds(5); // every call sets its own, shorter timeout
+    client.Timeout = TimeSpan.FromSeconds(30); // every call sets its own, shorter timeout (see UserClientOptions)
     client.DefaultRequestHeaders.Add("X-Caller-Service", "auction-service");
     if (!string.IsNullOrWhiteSpace(internalServiceKey))
         client.DefaultRequestHeaders.Add("X-Internal-Service-Key", internalServiceKey);
 });
+
+// Đồng bộ trạng thái sản phẩm sang Catalog (mở khoá khi phiên huỷ hoặc thất bại, chốt bán khi Seller chấp nhận đơn): hàng đợi trong bộ nhớ, gửi nền, thử lại khi lỗi.
+builder.Services.AddSingleton<CatalogSyncQueue>();
+builder.Services.AddSingleton<ICatalogSync>(sp => sp.GetRequiredService<CatalogSyncQueue>());
+builder.Services.AddHostedService<CatalogSyncWorker>();
+
+// Đẩy settlement sang Commerce để tạo đơn cho người thắng: hàng đợi trong bộ nhớ, gửi nền, thử lại khi lỗi. Mặc định tắt (Commerce:Enabled).
+var commerceOptions = CommerceOptions.FromConfiguration(builder.Configuration);
+builder.Services.AddSingleton(commerceOptions);
+builder.Services.AddHttpClient<ICommerceClient, CommerceClient>(client =>
+{
+    client.BaseAddress = new Uri(commerceOptions.BaseUrl);
+    client.Timeout = TimeSpan.FromSeconds(commerceOptions.TimeoutSeconds);
+    client.DefaultRequestHeaders.Add("X-Caller-Service", "auction-service");
+    if (!string.IsNullOrWhiteSpace(internalServiceKey))
+        client.DefaultRequestHeaders.Add("X-Internal-Service-Key", internalServiceKey);
+});
+builder.Services.AddSingleton<CommerceSyncQueue>();
+builder.Services.AddSingleton<ICommerceSync>(sp => sp.GetRequiredService<CommerceSyncQueue>());
+builder.Services.AddHostedService<CommerceSyncWorker>();
+
+// Thông báo sang Notification service: hàng đợi trong bộ nhớ, gửi nền, lỗi chỉ ghi log. Mặc định tắt (Notification:Enabled).
+// Notification yêu cầu header x-user-id (GUID bất kỳ) và x-user-roles chứa "service" hoặc "admin".
+var notificationOptions = NotificationOptions.FromConfiguration(builder.Configuration);
+builder.Services.AddSingleton(notificationOptions);
+builder.Services.AddSingleton<NotificationClient>();
+builder.Services.AddSingleton<INotificationClient>(sp => sp.GetRequiredService<NotificationClient>());
+builder.Services.AddHttpClient(NotificationDispatcher.NotificationHttpClient, client =>
+{
+    client.BaseAddress = new Uri(notificationOptions.BaseUrl);
+    client.Timeout = TimeSpan.FromSeconds(10);
+    client.DefaultRequestHeaders.Add("x-user-id", notificationOptions.ServiceUserId.ToString());
+    client.DefaultRequestHeaders.Add("x-user-roles", "service");
+    client.DefaultRequestHeaders.Add("X-Caller-Service", "auction-service");
+});
+builder.Services.AddHttpClient(NotificationDispatcher.UserHttpClient, client =>
+{
+    client.BaseAddress = new Uri(builder.Configuration["User:BaseUrl"] ?? "http://localhost:8001");
+    client.Timeout = TimeSpan.FromSeconds(5);
+    client.DefaultRequestHeaders.Add("X-Caller-Service", "auction-service");
+    if (!string.IsNullOrWhiteSpace(internalServiceKey))
+        client.DefaultRequestHeaders.Add("X-Internal-Service-Key", internalServiceKey);
+});
+builder.Services.AddHostedService<NotificationDispatcher>();
 
 // 3. REST Services
 builder.Services.AddControllers()
