@@ -5,7 +5,8 @@ using Auction.Domain.Exceptions;
 
 /// <summary>
 /// Stateless business rules for creating, editing and cancelling an auction.
-/// The seller always chooses the prices and the schedule: there are no default values.
+/// The seller chooses the start price and the schedule. The bid step is optional: when the seller does not send it,
+/// a default percent of the start price is used (the percent is set by the admin in the auction policy).
 /// </summary>
 public static class AuctionRules
 {
@@ -14,18 +15,61 @@ public static class AuctionRules
     public const int MinDurationMinutes = 60;
     public const int MaxDurationHours = 168;
 
+    /// <summary>Default bid step as a percent of the start price. Used only when the policy has no value for it.</summary>
+    public const decimal FallbackDefaultBidStepPercent = 10m;
+
+    /// <summary>How long the next bidder has to answer a winner offer (business rule: 24 hours).</summary>
+    public const int WinnerOfferWindowHours = 24;
+
     /// <summary>Both prices are required. Input problems return HTTP 400 with a VAL_ code.</summary>
     public static void ValidatePrices(decimal? startPriceAmount, decimal? bidStepAmount)
+    {
+        ValidateStartPrice(startPriceAmount);
+        if (bidStepAmount is null)
+            throw Invalid("VAL_INVALID_PRICE", "Bid step is required.");
+        ValidateBidStep(bidStepAmount);
+    }
+
+    /// <summary>The start price is required, zero or greater, with at most two decimal places.</summary>
+    public static void ValidateStartPrice(decimal? startPriceAmount)
     {
         if (startPriceAmount is null)
             throw Invalid("VAL_INVALID_PRICE", "Start price is required.");
         if (startPriceAmount < 0m || HasMoreThanTwoDecimals(startPriceAmount.Value))
             throw Invalid("VAL_INVALID_PRICE", "Start price must be zero or greater and have at most two decimal places.");
+    }
 
+    /// <summary>A bid step that is sent must be greater than zero, with at most two decimal places.</summary>
+    public static void ValidateBidStep(decimal? bidStepAmount)
+    {
         if (bidStepAmount is null)
             throw Invalid("VAL_INVALID_PRICE", "Bid step is required.");
         if (bidStepAmount <= 0m || HasMoreThanTwoDecimals(bidStepAmount.Value))
             throw Invalid("VAL_INVALID_PRICE", "Bid step must be greater than zero and have at most two decimal places.");
+    }
+
+    /// <summary>
+    /// Returns the bid step of the auction. A step sent by the seller is validated and used as is.
+    /// Without one, the step is the default percent of the start price, rounded to two decimals.
+    /// A start price too small to give a step above zero (for example 0) needs the seller to send a step.
+    /// </summary>
+    public static decimal ResolveBidStep(decimal? startPriceAmount, decimal? bidStepAmount, decimal defaultPercent)
+    {
+        ValidateStartPrice(startPriceAmount);
+
+        if (bidStepAmount is not null)
+        {
+            ValidateBidStep(bidStepAmount);
+            return bidStepAmount.Value;
+        }
+
+        var step = decimal.Round(startPriceAmount!.Value * defaultPercent / 100m, 2, MidpointRounding.AwayFromZero);
+        if (step <= 0m)
+            throw Invalid(
+                "VAL_INVALID_PRICE",
+                "Bid step is required because the start price is too small to calculate a default bid step.");
+
+        return step;
     }
 
     /// <summary>

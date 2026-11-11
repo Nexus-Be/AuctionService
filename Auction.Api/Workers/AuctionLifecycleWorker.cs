@@ -8,7 +8,8 @@ using Microsoft.Extensions.Logging;
 
 /// <summary>
 /// Tiến trình nền định kỳ quét các phiên đấu giá và tự chuyển trạng thái theo thời gian:
-/// Scheduled sang Running khi tới giờ bắt đầu, Running sang Ended hoặc Failed khi hết giờ kết thúc.
+/// Scheduled sang Running khi tới giờ bắt đầu, Running sang Ended hoặc Failed khi hết giờ kết thúc,
+/// và đóng các lời mời mua thay (winner offer) quá hạn phản hồi (phiên Ended sang Failed).
 /// Mỗi phiên được xử lý trong một scope riêng (DbContext riêng) nên lỗi hoặc xung đột ở một phiên không ảnh hưởng phiên khác.
 /// Cấu hình: AuctionLifecycle:Enabled (mặc định true), AuctionLifecycle:IntervalSeconds (mặc định 5, từ 1 đến 300).
 /// </summary>
@@ -57,7 +58,7 @@ public sealed class AuctionLifecycleWorker : BackgroundService
         }
     }
 
-    /// <summary>Một lượt quét: bắt đầu các phiên tới giờ trước, rồi kết thúc các phiên hết giờ. Lỗi của cả lượt chỉ được ghi log để lượt sau chạy lại.</summary>
+    /// <summary>Một lượt quét: bắt đầu các phiên tới giờ trước, rồi kết thúc các phiên hết giờ, cuối cùng đóng các lời mời quá hạn. Lỗi của cả lượt chỉ được ghi log để lượt sau chạy lại.</summary>
     private async Task RunOnceAsync(CancellationToken cancellationToken)
     {
         try
@@ -77,6 +78,14 @@ public sealed class AuctionLifecycleWorker : BackgroundService
                 if (await ProcessAsync(auctionId, "end", s => s.EndAuctionAsync(auctionId, cancellationToken)))
                     _logger.LogInformation("Auction {AuctionId} ended.", auctionId);
             }
+
+            var offersToExpire = await InScopeAsync(s => s.FindWinnerOffersToExpireAsync(BatchSize, cancellationToken));
+            foreach (var offerId in offersToExpire)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (await ProcessAsync(offerId, "expire winner offer", s => s.ExpireWinnerOfferAsync(offerId, cancellationToken)))
+                    _logger.LogInformation("Winner offer {OfferId} expired.", offerId);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -88,8 +97,8 @@ public sealed class AuctionLifecycleWorker : BackgroundService
         }
     }
 
-    /// <summary>Xử lý một phiên trong scope riêng. Lỗi của phiên này chỉ được ghi log và coi như chưa xử lý để không chặn các phiên còn lại.</summary>
-    private async Task<bool> ProcessAsync(Guid auctionId, string action, Func<IAuctionLifecycleService, Task<bool>> work)
+    /// <summary>Xử lý một phiên hoặc một lời mời trong scope riêng. Lỗi của mục này chỉ được ghi log và coi như chưa xử lý để không chặn các mục còn lại.</summary>
+    private async Task<bool> ProcessAsync(Guid entityId, string action, Func<IAuctionLifecycleService, Task<bool>> work)
     {
         try
         {
@@ -101,7 +110,7 @@ public sealed class AuctionLifecycleWorker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Could not {Action} auction {AuctionId}.", action, auctionId);
+            _logger.LogError(ex, "Could not {Action} {EntityId}.", action, entityId);
             return false;
         }
     }
