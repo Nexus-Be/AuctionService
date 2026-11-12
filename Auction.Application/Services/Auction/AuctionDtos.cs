@@ -20,6 +20,13 @@ public sealed record AuctionSummaryDto(
     DateTimeOffset ScheduledEndAt,
     DateTimeOffset CreatedAt);
 
+public sealed record SellerAuctionStatisticsDto(
+    Guid SellerId,
+    int SuccessfulAuctions,
+    int FailedAuctions,
+    int CompletedAuctions,
+    decimal? SuccessRate);
+
 public sealed record AuctionImageDto(string Url, bool IsPrimary);
 
 public sealed record AuctionDetailDto(

@@ -13,6 +13,9 @@ public interface IAuctionService
     /// <summary>Lấy danh sách phiên của riêng một seller, có phân trang và lọc theo trạng thái.</summary>
     Task<PagedData<AuctionSummaryDto>> ListSellerAuctionsAsync(Guid sellerId, int page = 1, int pageSize = 20, string? status = null, CancellationToken cancellationToken = default);
 
+    /// <summary>Lấy số liệu thống kê các phiên thành công và thất bại của seller.</summary>
+    Task<SellerAuctionStatisticsDto> GetSellerAuctionStatisticsAsync(Guid sellerId, CancellationToken cancellationToken = default);
+
     /// <summary>Lấy lịch sử đổi trạng thái của một phiên (mới nhất trước). Chỉ seller sở hữu phiên hoặc admin/staff được xem.</summary>
     Task<PagedData<AuctionStatusHistoryDto>> GetStatusHistoryAsync(ActorContext actor, bool isPrivileged, Guid auctionId, int page = 1, int pageSize = 20, CancellationToken cancellationToken = default);
 

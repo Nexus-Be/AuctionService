@@ -35,19 +35,21 @@ public sealed class AuctionService : IAuctionService
     private readonly IUserClient _users;
     private readonly TimeProvider _clock;
     private readonly IAuctionNotifier _notifier;
+    private readonly INotificationClient _notifications;
     private readonly ICatalogSync _catalogSync;
     private readonly ICommerceSync _commerceSync;
 
     /// <summary>Khởi tạo service với DbContext, các client gọi Catalog và User, đồng hồ hệ thống và bộ thông báo realtime.</summary>
     public AuctionService(
         IAuctionDbContext dbContext, ICatalogClient catalog, IUserClient users, TimeProvider clock, IAuctionNotifier notifier,
-        ICatalogSync catalogSync, ICommerceSync commerceSync)
+        INotificationClient notifications, ICatalogSync catalogSync, ICommerceSync commerceSync)
     {
         _dbContext = dbContext;
         _catalog = catalog;
         _users = users;
         _clock = clock;
         _notifier = notifier;
+        _notifications = notifications;
         _catalogSync = catalogSync;
         _commerceSync = commerceSync;
     }
@@ -63,6 +65,37 @@ public sealed class AuctionService : IAuctionService
     public Task<PagedData<AuctionSummaryDto>> ListSellerAuctionsAsync(
         Guid sellerId, int page = 1, int pageSize = 20, string? status = null, CancellationToken cancellationToken = default)
         => ListAuctionsAsync(sellerId, page, pageSize, status, cancellationToken);
+
+    /// <summary>Lấy số liệu thống kê các phiên thành công và thất bại của seller.</summary>
+    public async Task<SellerAuctionStatisticsDto> GetSellerAuctionStatisticsAsync(
+        Guid sellerId, CancellationToken cancellationToken = default)
+    {
+        var counts = await _dbContext.Auctions
+            .AsNoTracking()
+            .Where(a =>
+                a.SellerId == sellerId &&
+                !a.IsDeleted &&
+                a.AuctionState != null &&
+                !a.AuctionState.IsDeleted &&
+                (a.AuctionState.Status == AuctionStatus.Settled || a.AuctionState.Status == AuctionStatus.Failed))
+            .GroupBy(a => a.AuctionState!.Status)
+            .Select(g => new { Status = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.Status, x => x.Count, cancellationToken);
+
+        var successfulAuctions = counts.GetValueOrDefault(AuctionStatus.Settled);
+        var failedAuctions = counts.GetValueOrDefault(AuctionStatus.Failed);
+        var completedAuctions = successfulAuctions + failedAuctions;
+        decimal? successRate = completedAuctions == 0
+            ? null
+            : Math.Round(successfulAuctions * 100m / completedAuctions, 2, MidpointRounding.AwayFromZero);
+
+        return new SellerAuctionStatisticsDto(
+            sellerId,
+            successfulAuctions,
+            failedAuctions,
+            completedAuctions,
+            successRate);
+    }
 
     /// <summary>
     /// Lấy lịch sử đổi trạng thái của một phiên, mới nhất trước, có phân trang.
@@ -566,6 +599,19 @@ public sealed class AuctionService : IAuctionService
 
             await _notifier.AuctionStatusChangedAsync(
                 auctionId, new AuctionStatusChangedMessage(auctionId, state.Status.ToString(), now), CancellationToken.None);
+
+            if (state.Status == AuctionStatus.Failed)
+            {
+                _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+                    auctionId, auction.SellerId, auction.SnapshotProductTitle,
+                    $"Commerce payment status: {paymentStatus}.", now, null));
+            }
+        }
+        else
+        {
+            _notifications.NotifyReplacementWinnerOffer(new ReplacementWinnerOfferNotification(
+                auctionId, offer.Id, offer.BidId, offer.BidderId, winnerId, auction.SellerId,
+                auction.SnapshotProductTitle, offer.Amount, offer.OfferedAt, offer.ExpiresAt, null));
         }
 
         return response;
@@ -672,6 +718,12 @@ public sealed class AuctionService : IAuctionService
         else
         {
             _catalogSync.UnlockProduct(auction.ProductId, auctionId);
+            _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+                auctionId, auction.SellerId, auction.SnapshotProductTitle,
+                decision == SettlementPaymentStatus.SellerRejected
+                    ? "The seller rejected the order."
+                    : "The seller did not respond to the order in time.",
+                now, null));
             await _notifier.AuctionStatusChangedAsync(
                 auctionId, new AuctionStatusChangedMessage(auctionId, state.Status.ToString(), now), CancellationToken.None);
         }
@@ -1067,6 +1119,8 @@ public sealed class AuctionService : IAuctionService
         // Báo cho người đang xem phiên để họ dừng đặt giá.
         await _notifier.AuctionCancelledAsync(
             auction.Id, new AuctionCancelledMessage(auction.Id, now), CancellationToken.None);
+        _notifications.NotifyAuctionCancelled(new AuctionCancelledNotification(
+            auction.Id, auction.SellerId, auction.SnapshotProductTitle, reason, now, false, actor.TraceId));
 
         return new AuctionCancelledResponse(auction.Id, fromStatus, state.Status, reason, now);
     }
@@ -1136,6 +1190,8 @@ public sealed class AuctionService : IAuctionService
         // Báo cho người đang xem phiên để họ dừng đặt giá. Không trừ uy tín seller.
         await _notifier.AuctionCancelledAsync(
             auction.Id, new AuctionCancelledMessage(auction.Id, now), CancellationToken.None);
+        _notifications.NotifyAuctionCancelled(new AuctionCancelledNotification(
+            auction.Id, auction.SellerId, auction.SnapshotProductTitle, reason, now, true, actor.TraceId));
 
         return new AuctionCancelledResponse(auction.Id, fromStatus, state.Status, reason, now);
     }
@@ -1279,6 +1335,10 @@ public sealed class AuctionService : IAuctionService
 
         // Đã lưu: mở khoá sản phẩm ở Catalog (gửi nền, có thử lại), rồi báo cho người đang xem phiên rằng phiên đã chuyển sang Failed.
         _catalogSync.UnlockProduct(auction.ProductId, auctionId);
+
+        _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+            auctionId, auction.SellerId, auction.SnapshotProductTitle,
+            "The invited replacement bidder declined the winner offer.", now, actor.TraceId));
 
         await _notifier.AuctionStatusChangedAsync(
             auctionId, new AuctionStatusChangedMessage(auctionId, state.Status.ToString(), now), CancellationToken.None);

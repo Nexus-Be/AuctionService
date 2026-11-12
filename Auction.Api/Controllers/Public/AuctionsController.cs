@@ -157,6 +157,19 @@ public class AuctionsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Gets successful and failed auction statistics for a seller profile.</summary>
+    [HttpGet("~/api/v1/sellers/{sellerId:guid}/auction-statistics")]
+    [ProducesResponseType(typeof(SellerAuctionStatisticsDto), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetSellerAuctionStatistics(
+        [FromRoute] Guid sellerId, CancellationToken ct)
+    {
+        if (sellerId == Guid.Empty)
+            return this.BadRequestError("VAL_INVALID_INPUT", "Seller ID is required.");
+
+        var result = await _auctionService.GetSellerAuctionStatisticsAsync(sellerId, ct);
+        return Ok(result);
+    }
+
     /// <summary>Bidder được mời chấp nhận trở thành người thắng thay người thắng trước. Chỉ đúng bidder được mời mới gọi được.</summary>
     [HttpPost("{auctionId:guid}/winner-offers/{offerId:guid}/accept")]
     [ProducesResponseType(typeof(WinnerOfferResponse), StatusCodes.Status200OK)]

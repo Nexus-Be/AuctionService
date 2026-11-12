@@ -16,6 +16,7 @@ using Auction.Application.Interfaces;
 /// <summary>
 /// Đọc hàng đợi và gửi từng thông báo sang Notification service ở nền.
 /// Bị vượt giá: POST /api/v1/notifications/auction-outbids. Người thắng: POST /api/v1/notifications/auction-winners (cần email người thắng, tra từ User service).
+/// Phiên thất bại, huỷ và lời mời winner thay thế lần lượt gửi tới auction-failed, auction-cancelled và auction-winner-offers.
 /// Mã sự kiện (sourceEventId) được sinh cố định từ dữ liệu nghiệp vụ nên gửi lại cùng thông báo là an toàn: Notification trả lại kết quả cũ, không gửi trùng.
 /// Lỗi tạm thời (5xx, 408, 429, hết giờ chờ, mất kết nối) thử lại tối đa NotificationOptions.MaxAttempts lần; lỗi 4xx khác chỉ ghi log. Không có outbox nên thông báo cuối cùng thất bại sẽ bị bỏ.
 /// </summary>
@@ -29,6 +30,9 @@ public sealed class NotificationDispatcher : BackgroundService
 
     private const string OutbidPath = "/api/v1/notifications/auction-outbids";
     private const string WinnerPath = "/api/v1/notifications/auction-winners";
+    private const string FailedPath = "/api/v1/notifications/auction-failed";
+    private const string CancelledPath = "/api/v1/notifications/auction-cancelled";
+    private const string ReplacementWinnerOfferPath = "/api/v1/notifications/auction-winner-offers";
 
     // Endpoint đề xuất bên User service (hiện chưa có): nhận { "userId": guid }, trả email và fullName (có thể nằm trong "data").
     private const string UserContactPath = "/api/v1/internal/users/contact-info";
@@ -110,6 +114,22 @@ public sealed class NotificationDispatcher : BackgroundService
                     WinnerPath, BuildWinner(winner.Notification, contact), "auction winner", winner.Notification.AuctionId, cancellationToken);
                 break;
             }
+
+            case AuctionFailedWorkItem failed:
+                await PostWithRetryAsync(
+                    FailedPath, BuildFailed(failed.Notification), "auction failed", failed.Notification.AuctionId, cancellationToken);
+                break;
+
+            case AuctionCancelledWorkItem cancelled:
+                await PostWithRetryAsync(
+                    CancelledPath, BuildCancelled(cancelled.Notification), "auction cancelled", cancelled.Notification.AuctionId, cancellationToken);
+                break;
+
+            case ReplacementWinnerOfferWorkItem offer:
+                await PostWithRetryAsync(
+                    ReplacementWinnerOfferPath, BuildReplacementWinnerOffer(offer.Notification),
+                    "replacement winner offer", offer.Notification.AuctionId, cancellationToken);
+                break;
         }
     }
 
@@ -148,6 +168,46 @@ public sealed class NotificationDispatcher : BackgroundService
         currency = "VND",
         settledAt = n.SettledAt,
         paymentDeadline = n.PaymentDeadline
+    };
+
+    private static object BuildFailed(AuctionFailedNotification n) => new
+    {
+        sourceEventId = DeterministicGuid($"auction-failed:{n.AuctionId:N}:{n.FailedAt:O}"),
+        auctionId = n.AuctionId,
+        sellerUserId = n.SellerUserId,
+        auctionTitle = CleanTitle(n.AuctionTitle),
+        reason = Clip(n.Reason, 1000),
+        failedAt = n.FailedAt,
+        traceId = Clip(n.TraceId, 100)
+    };
+
+    private static object BuildCancelled(AuctionCancelledNotification n) => new
+    {
+        sourceEventId = DeterministicGuid($"auction-cancelled:{n.AuctionId:N}:{n.CancelledAt:O}"),
+        auctionId = n.AuctionId,
+        sellerUserId = n.SellerUserId,
+        auctionTitle = CleanTitle(n.AuctionTitle),
+        reason = Clip(n.Reason, 1000),
+        cancelledAt = n.CancelledAt,
+        forced = n.Forced,
+        traceId = Clip(n.TraceId, 100)
+    };
+
+    private static object BuildReplacementWinnerOffer(ReplacementWinnerOfferNotification n) => new
+    {
+        sourceEventId = DeterministicGuid($"auction-winner-offer:{n.OfferId:N}"),
+        auctionId = n.AuctionId,
+        offerId = n.OfferId,
+        bidId = n.BidId,
+        bidderUserId = n.BidderUserId,
+        previousWinnerUserId = n.PreviousWinnerUserId,
+        sellerUserId = n.SellerUserId,
+        auctionTitle = CleanTitle(n.AuctionTitle),
+        amount = n.Amount,
+        currency = "VND",
+        offeredAt = n.OfferedAt,
+        expiresAt = n.ExpiresAt,
+        traceId = Clip(n.TraceId, 100)
     };
 
     // ------------------------------------------------------------------ HTTP

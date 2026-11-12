@@ -92,7 +92,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("RecreatedFromAuctionId");
 
-                    b.ToTable("Auctions");
+                    b.ToTable("Auctions", (string)null);
 
                     b.HasData(
                         new
@@ -224,7 +224,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("AuctionConfigs");
+                    b.ToTable("AuctionConfigs", (string)null);
 
                     b.HasData(
                         new
@@ -283,7 +283,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("TriggerBidId");
 
-                    b.ToTable("AuctionExtensions");
+                    b.ToTable("AuctionExtensions", (string)null);
                 });
 
             modelBuilder.Entity("Auction.Domain.Entities.AuctionResult", b =>
@@ -327,7 +327,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("WinningBidId");
 
-                    b.ToTable("AuctionResults");
+                    b.ToTable("AuctionResults", (string)null);
 
                     b.HasData(
                         new
@@ -394,7 +394,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("Status", "PaymentDeadlineAt");
 
-                    b.ToTable("AuctionSettlements");
+                    b.ToTable("AuctionSettlements", (string)null);
 
                     b.HasData(
                         new
@@ -468,7 +468,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
                     b.HasIndex("AuctionId")
                         .IsUnique();
 
-                    b.ToTable("AuctionStates");
+                    b.ToTable("AuctionStates", (string)null);
 
                     b.HasData(
                         new
@@ -574,7 +574,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("AuctionId");
 
-                    b.ToTable("AuctionStatusHistories");
+                    b.ToTable("AuctionStatusHistories", (string)null);
 
                     b.HasData(
                         new
@@ -674,7 +674,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("Status", "ExpiresAt");
 
-                    b.ToTable("AuctionWinnerOffers");
+                    b.ToTable("AuctionWinnerOffers", (string)null);
                 });
 
             modelBuilder.Entity("Auction.Domain.Entities.AuditLog", b =>
@@ -738,7 +738,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("AuditLogs");
+                    b.ToTable("AuditLogs", (string)null);
 
                     b.HasData(
                         new
@@ -798,7 +798,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("AuctionId");
 
-                    b.ToTable("Bids");
+                    b.ToTable("Bids", (string)null);
 
                     b.HasData(
                         new
@@ -883,7 +883,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("BidId");
 
-                    b.ToTable("BidHistories");
+                    b.ToTable("BidHistories", (string)null);
 
                     b.HasData(
                         new
@@ -954,7 +954,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
                     b.HasIndex("BidId")
                         .IsUnique();
 
-                    b.ToTable("BidInvalidations");
+                    b.ToTable("BidInvalidations", (string)null);
                 });
 
             modelBuilder.Entity("Auction.Domain.Entities.IdempotencyKey", b =>
@@ -999,7 +999,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("IdempotencyKeys");
+                    b.ToTable("IdempotencyKeys", (string)null);
                 });
 
             modelBuilder.Entity("Auction.Domain.Entities.ProductOpenAuction", b =>
@@ -1034,7 +1034,7 @@ namespace Auction.Infrastructure.Persistence.Migrations
                     b.HasIndex("ProductId")
                         .IsUnique();
 
-                    b.ToTable("ProductOpenAuctions");
+                    b.ToTable("ProductOpenAuctions", (string)null);
 
                     b.HasData(
                         new

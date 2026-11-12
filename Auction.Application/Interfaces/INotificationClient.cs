@@ -13,6 +13,15 @@ public interface INotificationClient
 
     /// <summary>Báo cho người thắng khi phiên kết thúc. Gọi sau khi kết quả và settlement đã được lưu.</summary>
     void NotifyAuctionWinner(AuctionWinnerNotification notification);
+
+    /// <summary>Báo cho seller khi phiên chuyển sang Failed sau khi trạng thái đã được lưu.</summary>
+    void NotifyAuctionFailed(AuctionFailedNotification notification);
+
+    /// <summary>Báo cho seller khi phiên bị huỷ sau khi trạng thái đã được lưu.</summary>
+    void NotifyAuctionCancelled(AuctionCancelledNotification notification);
+
+    /// <summary>Báo cho bidder kế tiếp khi họ được mời thay winner trước đó.</summary>
+    void NotifyReplacementWinnerOffer(ReplacementWinnerOfferNotification notification);
 }
 
 /// <summary>Dữ liệu thông báo bị vượt giá: bid mới (TriggerBidId) đã vượt bid đang dẫn đầu trước đó (PreviousBidId). Tiền tệ luôn là VND.</summary>
@@ -41,3 +50,33 @@ public sealed record AuctionWinnerNotification(
     decimal WinningAmount,
     DateTimeOffset SettledAt,
     DateTimeOffset PaymentDeadline);
+
+public sealed record AuctionFailedNotification(
+    Guid AuctionId,
+    Guid SellerUserId,
+    string? AuctionTitle,
+    string Reason,
+    DateTimeOffset FailedAt,
+    string? TraceId);
+
+public sealed record AuctionCancelledNotification(
+    Guid AuctionId,
+    Guid SellerUserId,
+    string? AuctionTitle,
+    string? Reason,
+    DateTimeOffset CancelledAt,
+    bool Forced,
+    string? TraceId);
+
+public sealed record ReplacementWinnerOfferNotification(
+    Guid AuctionId,
+    Guid OfferId,
+    Guid BidId,
+    Guid BidderUserId,
+    Guid PreviousWinnerUserId,
+    Guid SellerUserId,
+    string? AuctionTitle,
+    decimal Amount,
+    DateTimeOffset OfferedAt,
+    DateTimeOffset ExpiresAt,
+    string? TraceId);

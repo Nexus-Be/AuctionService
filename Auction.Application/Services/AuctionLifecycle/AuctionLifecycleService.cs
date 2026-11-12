@@ -276,6 +276,9 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
         else
         {
             _catalogSync.UnlockProduct(auction.ProductId, auctionId);
+            _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+                auctionId, auction.SellerId, auction.SnapshotProductTitle,
+                "Auction ended without a valid bid.", now, null));
         }
 
         return true;
@@ -366,6 +369,9 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
         {
             // Đã lưu: mở khoá sản phẩm ở Catalog (gửi nền, có thử lại), rồi báo realtime phiên đã Failed.
             _catalogSync.UnlockProduct(auction!.ProductId, offer.AuctionId);
+            _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+                offer.AuctionId, auction.SellerId, auction.SnapshotProductTitle,
+                "The replacement winner offer expired without an answer.", now, null));
 
             await _notifier.AuctionStatusChangedAsync(
                 offer.AuctionId, new AuctionStatusChangedMessage(offer.AuctionId, AuctionStatus.Failed.ToString(), now), CancellationToken.None);
