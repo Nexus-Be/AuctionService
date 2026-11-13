@@ -3,6 +3,7 @@ using Auction.Api.Extensions;
 using Auction.Api.Hubs;
 using Auction.Api.Workers;
 using Auction.Application;
+using Auction.Application.Common;
 using Auction.Application.Interfaces;
 using Auction.Infrastructure;
 using Auction.Infrastructure.Clients;
@@ -85,6 +86,26 @@ builder.Services.AddHttpClient<IUserClient, UserClient>(client =>
     client.DefaultRequestHeaders.Add("X-Caller-Service", "auction-service");
     if (!string.IsNullOrWhiteSpace(internalServiceKey))
         client.DefaultRequestHeaders.Add("X-Internal-Service-Key", internalServiceKey);
+});
+
+// Bộ nhớ đệm cho hồ sơ đấu giá của User (UserClient giữ vài chục giây để không gọi User ở mỗi lượt đặt giá).
+builder.Services.AddMemoryCache();
+
+// Cọc đấu giá: Wallet giữ tiền (hold) qua cổng thanh toán. Deposit:CallbackBaseUrl là địa chỉ Wallet dùng để gọi lại service này;
+// Deposit:AllowedReturnUrlHosts là danh sách host mà returnUrl được trỏ tới (rỗng thì từ chối mọi returnUrl).
+int ReadInt(string key, int fallback) =>
+    int.TryParse(builder.Configuration[key], out var value) && value >= 0 ? value : fallback;
+
+builder.Services.AddSingleton(new DepositOptions(
+    builder.Configuration["Deposit:CallbackBaseUrl"] ?? string.Empty,
+    builder.Configuration.GetSection("Deposit:AllowedReturnUrlHosts").Get<string[]>() ?? Array.Empty<string>(),
+    ReadInt("Deposit:PaymentWindowHours", 24),
+    ReadInt("Deposit:SafetyMarginMinutes", 5)));
+
+builder.Services.AddHttpClient<IWalletClient, WalletClient>(client =>
+{
+    client.BaseAddress = new Uri(builder.Configuration["Wallet:BaseUrl"] ?? "http://localhost:8008");
+    client.Timeout = TimeSpan.FromSeconds(10); // Wallet routes are plain REST: no X-Internal-Service-Key is sent
 });
 
 // Đồng bộ trạng thái sản phẩm sang Catalog (mở khoá khi phiên huỷ hoặc thất bại, chốt bán khi Seller chấp nhận đơn): hàng đợi trong bộ nhớ, gửi nền, thử lại khi lỗi.

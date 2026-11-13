@@ -15,5 +15,10 @@ public enum AuditAction
     AuctionEnd = 10,
     WinnerOfferCreate = 11,
     WinnerOfferExpire = 12,
-    SellerAccept = 13
+    SellerAccept = 13,
+    DepositCreate = 14,
+    DepositAuthorize = 15,
+    DepositFail = 16,
+    DepositExpire = 17,
+    DepositRelease = 18
 }

@@ -12,8 +12,10 @@ using global::Auction.Application.Common;
 using global::Auction.Application.Common.Extensions;
 using global::Auction.Application.Common.Models;
 using global::Auction.Application.Interfaces;
+using global::Auction.Application.Services.Deposit;
 using global::Auction.Domain.Enums;
 using global::Auction.Domain.Exceptions;
+using global::Auction.Domain.Rules;
 using AuctionConfigEntity = global::Auction.Domain.Entities.AuctionConfig;
 
 public sealed class AuctionConfigService : IAuctionConfigService
@@ -200,6 +202,145 @@ public sealed class AuctionConfigService : IAuctionConfigService
 
         return ToDto(newConfig);
     }
+
+    /// <summary>
+    /// Lấy chính sách cọc hiện hành (hoặc theo version chỉ định) dành cho Admin.
+    /// Khi không truyền version, trả kèm lịch sử tất cả các version.
+    /// </summary>
+    public async Task<DepositPolicyResponse> GetDepositPolicyAsync(
+        int? version, CancellationToken cancellationToken = default)
+    {
+        var now = _clock.GetUtcNow();
+
+        if (version is { } requestedVersion)
+        {
+            var config = await _dbContext.AuctionConfigs
+                .AsNoTracking()
+                .Where(c => c.ConfigKey == DepositPolicyReader.ConfigKey && c.Version == requestedVersion && !c.IsDeleted)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (config is null)
+                throw new EntityNotFoundException("POLICY_VERSION_NOT_FOUND", "DepositPolicy", requestedVersion);
+
+            var policy = DepositPolicyReader.Parse(config.Version, config.ConfigValue);
+            return ToPolicyResponse(policy, config.UpdatedAt, config.UpdatedBy?.ToString(), config.Description, history: null);
+        }
+
+        var activeConfig = await _dbContext.AuctionConfigs
+            .AsNoTracking()
+            .Where(c => c.ConfigKey == DepositPolicyReader.ConfigKey && c.IsActive && !c.IsDeleted)
+            .OrderByDescending(c => c.Version)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        var historyRows = await _dbContext.AuctionConfigs
+            .AsNoTracking()
+            .Where(c => c.ConfigKey == DepositPolicyReader.ConfigKey && !c.IsDeleted)
+            .OrderByDescending(c => c.Version)
+            .Select(c => new DepositPolicyHistoryItemDto(c.Version, c.UpdatedAt, c.UpdatedBy == null ? null : c.UpdatedBy.ToString(), c.Description))
+            .ToListAsync(cancellationToken);
+
+        if (activeConfig is null)
+        {
+            var defaultPolicy = DepositRules.DefaultPolicy;
+            var defaultEffective = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+            return ToPolicyResponse(defaultPolicy, defaultEffective, "SYSTEM", "Default built-in deposit policy", historyRows);
+        }
+
+        var activePolicy = DepositPolicyReader.Parse(activeConfig.Version, activeConfig.ConfigValue);
+        return ToPolicyResponse(activePolicy, activeConfig.UpdatedAt, activeConfig.UpdatedBy?.ToString(), activeConfig.Description, historyRows);
+    }
+
+    /// <summary>
+    /// Cập nhật chính sách cọc và phát hành version mới. Kiểm tra header If-Match chống xung đột phiên bản.
+    /// </summary>
+    public async Task<UpdateDepositPolicyResponse> UpdateDepositPolicyAsync(
+        ActorContext actor, string? ifMatch, UpdateDepositPolicyRequest request, CancellationToken cancellationToken = default)
+    {
+        var now = _clock.GetUtcNow();
+
+        if (string.IsNullOrWhiteSpace(ifMatch))
+            throw new DomainException("IF_MATCH_REQUIRED", "The If-Match header is required with the current policy version.", 428);
+
+        var cleanIfMatch = ifMatch.Trim().Trim('\"');
+        if (!int.TryParse(cleanIfMatch, out var expectedVersion))
+            throw new DomainException("VALIDATION_ERROR", "The If-Match header must be an integer version number.", 400);
+
+        var tiers = request.Tiers?.Select(t => new DepositTier(t.MinReputation, t.MaxReputation, t.RatePercent)).ToList();
+        var surcharges = request.StreakSurcharges?.Select(s => new StreakSurcharge(s.Streak, s.AdditionalPercent)).ToList();
+
+        DepositRules.ValidatePolicy(
+            request.Reason,
+            tiers,
+            request.NewUserRatePercent,
+            surcharges,
+            request.MaxRatePercent,
+            request.MinDepositAmount,
+            request.Forfeiture?.SellerPercent,
+            request.Forfeiture?.PlatformPercent);
+
+        var currentActive = await _dbContext.AuctionConfigs
+            .Where(c => c.ConfigKey == DepositPolicyReader.ConfigKey && c.IsActive && !c.IsDeleted)
+            .OrderByDescending(c => c.Version)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        var currentVersion = currentActive?.Version ?? 0;
+        if (currentVersion != expectedVersion)
+            throw new DomainException("VERSION_CONFLICT", "The deposit policy has changed since it was loaded. Reload it and try again.", 412);
+
+        if (currentActive is not null)
+        {
+            currentActive.IsActive = false;
+            currentActive.UpdatedAt = now;
+        }
+
+        var newVersion = currentVersion + 1;
+        var policyJson = new DepositPolicyReader.PolicyJson(
+            request.Tiers?.Select(t => new DepositPolicyReader.TierJson(t.MinReputation, t.MaxReputation, t.RatePercent)).ToList(),
+            request.NewUserRatePercent,
+            request.StreakSurcharges?.Select(s => new DepositPolicyReader.SurchargeJson(s.Streak, s.AdditionalPercent)).ToList(),
+            request.MaxRatePercent,
+            request.MinDepositAmount,
+            new DepositPolicyReader.ForfeitureJson(request.Forfeiture!.SellerPercent, request.Forfeiture.PlatformPercent));
+
+        var json = JsonSerializer.Serialize(policyJson, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        var newConfig = new AuctionConfigEntity
+        {
+            Id = Guid.NewGuid(),
+            ConfigKey = DepositPolicyReader.ConfigKey,
+            ConfigValue = json,
+            Description = request.Reason!.Trim(),
+            Version = newVersion,
+            IsActive = true,
+            UpdatedBy = actor.UserId,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+
+        _dbContext.AuctionConfigs.Add(newConfig);
+        _dbContext.AddAuditLog(
+            AuditAction.ConfigUpdate, "AuctionConfig", newConfig.Id.ToString(),
+            oldValues: currentActive is null ? null : new { version = currentVersion, configValue = currentActive.ConfigValue },
+            newValues: new { version = newVersion, configValue = json, reason = request.Reason.Trim() },
+            userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+
+        await _dbContext.SaveChangesAsync(cancellationToken);
+        return new UpdateDepositPolicyResponse(newVersion, now);
+    }
+
+    private static DepositPolicyResponse ToPolicyResponse(
+        DepositPolicy policy, DateTimeOffset effectiveFrom, string? updatedBy, string? reason, IReadOnlyList<DepositPolicyHistoryItemDto>? history) => new(
+        policy.Version,
+        effectiveFrom,
+        updatedBy,
+        reason,
+        policy.Tiers.Select(t => new DepositPolicyTierDto(t.MinReputation, t.MaxReputation, t.RatePercent)).ToList(),
+        policy.NewUserRatePercent,
+        policy.StreakSurcharges.Select(s => new DepositPolicySurchargeDto(s.Streak, s.AdditionalPercent)).ToList(),
+        policy.MaxRatePercent,
+        policy.MinDepositAmount,
+        new DepositPolicyForfeitureDto(policy.SellerPercent, policy.PlatformPercent),
+        history);
 
     /// <summary>Gán một thuộc tính số thập phân vào JSON cấu hình và trả về true nếu giá trị thực sự thay đổi.</summary>
     private static bool SetDecimal(JsonObject policy, string name, decimal value)

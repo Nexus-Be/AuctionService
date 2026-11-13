@@ -64,13 +64,53 @@ public sealed record AuctionStatusHistoryDto(
     Guid? ChangedBy,
     DateTimeOffset ChangedAt);
 
+public sealed record AuctionResultWinnerDto(
+    Guid? BidderId,
+    string? DisplayName);
+
+public sealed record AuctionResultSettlementDto(
+    Guid? OrderId,
+    string SettlementStatus,
+    decimal DepositAmount,
+    decimal RemainingAmount,
+    DateTimeOffset? PaymentDeadlineAt);
+
+public sealed record AuctionResultMyDepositDto(
+    DepositStatus Status,
+    decimal Amount);
+
+public sealed record AuctionResultSecondChanceDto(
+    Guid? OfferId,
+    Guid? BidderId,
+    string Status,
+    decimal? OfferPrice,
+    DateTimeOffset? RespondBy);
+
 public sealed record AuctionResultDto(
     Guid AuctionId,
     AuctionStatus? Status,
+    string Phase,
     Guid? WinnerId,
     Guid? WinningBidId,
     decimal? FinalPriceAmount,
-    DateTimeOffset DeterminedAt);
+    DateTimeOffset? DeterminedAt,
+    AuctionResultWinnerDto? Winner,
+    decimal? WinningAmount,
+    AuctionResultSettlementDto? Settlement,
+    AuctionResultMyDepositDto? MyDeposit,
+    AuctionResultSecondChanceDto? SecondChance);
+
+/// <summary>Thông tin lời mời mua lại của người về nhì trong một phiên cụ thể (API 09).</summary>
+public sealed record MySecondChanceOfferDto(
+    Guid OfferId,
+    string Status,
+    decimal OfferPrice,
+    string Currency,
+    DateTimeOffset OfferedAt,
+    DateTimeOffset RespondBy,
+    Guid? OrderId,
+    DateTimeOffset? PaymentDeadlineAt,
+    string Notice);
 
 /// <summary>Latest auction of a product. All fields except the product id are empty or false when the product was never auctioned.</summary>
 public sealed record ProductAuctionStatusDto(

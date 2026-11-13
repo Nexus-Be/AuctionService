@@ -14,4 +14,10 @@ public interface IAuctionConfigService
 
     /// <summary>Phát hành version mới cho cấu hình chống bắn tỉa, version cũ được giữ lại làm lịch sử (chỉ admin).</summary>
     Task<AuctionConfigDto> UpdateAsync(ActorContext actor, UpdateAuctionConfigRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>Lấy chính sách cọc hiện hành hoặc theo version chỉ định (chỉ admin).</summary>
+    Task<DepositPolicyResponse> GetDepositPolicyAsync(int? version, CancellationToken cancellationToken = default);
+
+    /// <summary>Cập nhật chính sách cọc và phát hành version mới (chỉ admin). Yêu cầu If-Match khớp với version hiện hành.</summary>
+    Task<UpdateDepositPolicyResponse> UpdateDepositPolicyAsync(ActorContext actor, string? ifMatch, UpdateDepositPolicyRequest request, CancellationToken cancellationToken = default);
 }

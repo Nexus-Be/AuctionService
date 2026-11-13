@@ -9,6 +9,7 @@ using Microsoft.EntityFrameworkCore;
 using global::Auction.Application.Common.Extensions;
 using global::Auction.Application.Interfaces;
 using global::Auction.Application.Services.Auction;
+using global::Auction.Application.Services.Deposit;
 using global::Auction.Domain.Entities;
 using global::Auction.Domain.Enums;
 
@@ -23,11 +24,12 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
     private readonly INotificationClient _notifications;
     private readonly ICatalogSync _catalogSync;
     private readonly ICommerceSync _commerceSync;
+    private readonly IDepositService _deposits;
 
-    /// <summary>Khởi tạo service với DbContext, đồng hồ hệ thống và bộ thông báo realtime.</summary>
+    /// <summary>Khởi tạo service với DbContext, đồng hồ hệ thống, bộ thông báo realtime và service cọc.</summary>
     public AuctionLifecycleService(
         IAuctionDbContext dbContext, TimeProvider clock, IAuctionNotifier notifier, INotificationClient notifications,
-        ICatalogSync catalogSync, ICommerceSync commerceSync)
+        ICatalogSync catalogSync, ICommerceSync commerceSync, IDepositService deposits)
     {
         _dbContext = dbContext;
         _clock = clock;
@@ -35,6 +37,7 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
         _notifications = notifications;
         _catalogSync = catalogSync;
         _commerceSync = commerceSync;
+        _deposits = deposits;
     }
 
     /// <summary>Tìm các phiên Scheduled đã tới giờ bắt đầu. Chỉ đọc mã phiên, việc chuyển trạng thái làm riêng từng phiên.</summary>
@@ -258,8 +261,35 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             oldValues: new { status = AuctionStatus.Running.ToString() },
             newValues: newValues);
 
+        // Đánh dấu giải phóng cọc cho các bidder không thắng (hoặc tất cả bidder nếu phiên không có bid hợp lệ).
+        var depositsToRelease = await _dbContext.AuctionDeposits
+            .Where(d => d.AuctionId == auctionId && !d.IsDeleted &&
+                        (d.Status == DepositStatus.Authorized || d.Status == DepositStatus.Pending) &&
+                        (winningBid == null || d.BidderId != winningBid.BidderId))
+            .ToListAsync(cancellationToken);
+
+        var releaseReason = winningBid is null ? "AUCTION_FAILED" : "AUCTION_ENDED_NOT_WINNER";
+        foreach (var deposit in depositsToRelease)
+        {
+            var oldStatus = deposit.Status;
+            deposit.Status = DepositStatus.Released;
+            deposit.ReleaseReason = releaseReason;
+            // Always set ReleasePending = true: a Pending deposit without GatewayReference may still have locked funds at Wallet if W1 timed out.
+            deposit.ReleasePending = true;
+            deposit.UpdatedAt = now;
+            deposit.RowVersion += 1;
+
+            _dbContext.AddAuditLog(
+                AuditAction.DepositRelease, "AuctionDeposit", deposit.Id.ToString(),
+                oldValues: new { status = oldStatus },
+                newValues: new { depositId = deposit.Id, status = deposit.Status, releaseReason, releasePending = deposit.ReleasePending });
+        }
+
         if (!await TrySaveAsync(cancellationToken))
             return false;
+
+        if (depositsToRelease.Count > 0)
+            await _deposits.ReleasePendingDepositsForAuctionAsync(auctionId, cancellationToken);
 
         await _notifier.AuctionStatusChangedAsync(
             auctionId, new AuctionStatusChangedMessage(auctionId, toStatus.ToString(), now), CancellationToken.None);

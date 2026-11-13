@@ -111,12 +111,27 @@ public class AuctionsController : ControllerBase
         return Ok(result);
     }
 
-    /// <summary>Gets the result (winner and final price) of an auction once it has been determined.</summary>
+    /// <summary>Gets the post-auction result and phase (winner, final price, settlement, myDeposit and secondChance) filtered by caller role (API 06).</summary>
     [HttpGet("{id:guid}/result")]
     [ProducesResponseType(typeof(AuctionResultDto), StatusCodes.Status200OK)]
     public async Task<ActionResult<AuctionResultDto>> GetResult([FromRoute] Guid id, CancellationToken ct)
     {
-        var result = await _auctionService.GetResultAsync(id, ct);
+        var callerId = this.GetUserId();
+        var isPrivileged = this.IsAdmin() || this.HasRole("staff");
+        var result = await _auctionService.GetResultAsync(id, callerId, isPrivileged, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Runner-up bidder views their own second-chance offer for a specific auction (API 09).</summary>
+    [HttpGet("{id:guid}/second-chance/me")]
+    [ProducesResponseType(typeof(MySecondChanceOfferDto), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetMySecondChanceOffer([FromRoute] Guid id, CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("buyer") && !this.HasRole("seller"))
+            return this.ForbiddenError("Only buyer or seller accounts can view second-chance offers.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.GetMySecondChanceOfferAsync(id, userId, ct);
         return Ok(result);
     }
 

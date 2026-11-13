@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using Auction.Application.Interfaces;
 using Auction.Domain.Exceptions;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 
 /// <summary>
@@ -20,7 +21,11 @@ public sealed class UserClient : IUserClient
     private const string CheckReputationPath = "/api/v1/internal/users/check-reputation";
     private const string VerifyBidPath = "/api/v1/internal/users/verify-bid-eligibility";
     private const string BatchInfoPath = "/api/v1/internal/users/batch-public-info";
+    private const string DepositProfilePathFormat = "/api/v1/internal/users/{0}/auction-deposit-profile";
     private const int BatchLimit = 100;
+
+    // The deposit profile is read on every bid, so it is cached briefly. A newly restricted bidder can still bid for up to this long.
+    private static readonly TimeSpan DepositProfileCacheLifetime = TimeSpan.FromSeconds(45);
 
     // Bidding is a hot path: a slow User service must not hold connections of Auction.
     private static readonly TimeSpan BuiltInBidTimeout = TimeSpan.FromMilliseconds(800);
@@ -31,14 +36,16 @@ public sealed class UserClient : IUserClient
     private readonly HttpClient _http;
     private readonly UserClientOptions _options;
     private readonly ILogger<UserClient> _logger;
+    private readonly IMemoryCache _cache;
     private readonly TimeSpan _bidTimeout;
     private readonly TimeSpan _defaultTimeout;
 
-    public UserClient(HttpClient http, UserClientOptions options, ILogger<UserClient> logger)
+    public UserClient(HttpClient http, UserClientOptions options, ILogger<UserClient> logger, IMemoryCache cache)
     {
         _http = http;
         _options = options;
         _logger = logger;
+        _cache = cache;
         _bidTimeout = options.BidTimeout ?? BuiltInBidTimeout;
         _defaultTimeout = options.DefaultTimeout ?? BuiltInDefaultTimeout;
     }
@@ -86,6 +93,26 @@ public sealed class UserClient : IUserClient
             throw InvalidResponse("eligible is true but a failure reason is present");
 
         return new UserBidEligibility(userId, eligible, reason);
+    }
+
+    public async Task<UserAuctionDepositProfile> GetAuctionDepositProfileAsync(
+        Guid userId, bool bypassCache = false, CancellationToken cancellationToken = default)
+    {
+        if (_options.BypassUserCheck)
+        {
+            _logger.LogWarning("BypassUserCheck is on: the deposit profile was skipped for user {UserId}.", userId);
+            return new UserAuctionDepositProfile(userId, "ACTIVE", 100, false, 0, false, null, null, null);
+        }
+
+        var cacheKey = $"user-deposit-profile:{userId:N}";
+        if (!bypassCache && _cache.TryGetValue(cacheKey, out UserAuctionDepositProfile? cached) && cached is not null)
+            return cached;
+
+        var payload = await GetAsync(string.Format(DepositProfilePathFormat, userId), _bidTimeout, cancellationToken);
+        var profile = ParseDepositProfile(payload, userId);
+
+        _cache.Set(cacheKey, profile, DepositProfileCacheLifetime);
+        return profile;
     }
 
     public async Task<IReadOnlyDictionary<Guid, UserPublicInfo>> GetPublicInfosAsync(
@@ -164,6 +191,80 @@ public sealed class UserClient : IUserClient
             _logger.LogWarning(ex, "User service call failed.");
             throw new DomainException("USER_SERVICE_UNAVAILABLE", "The user service is unavailable.", 503);
         }
+    }
+
+    /// <summary>Gets a resource and returns the useful part of the answer. 404 means the user does not exist; any other failure means User is unavailable.</summary>
+    private async Task<JsonElement> GetAsync(string path, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutSource.CancelAfter(timeout);
+
+        try
+        {
+            using var response = await _http.GetAsync(path, timeoutSource.Token);
+            if (response.StatusCode == HttpStatusCode.NotFound)
+                throw new DomainException("USER_NOT_FOUND", "The user was not found.", 404);
+            if (!response.IsSuccessStatusCode)
+                throw new HttpRequestException($"User service answered {(int)response.StatusCode}.");
+
+            var text = await response.Content.ReadAsStringAsync(timeoutSource.Token);
+            using var document = JsonDocument.Parse(text);
+            var root = document.RootElement;
+            var payload = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("data", out var data) &&
+                          data.ValueKind == JsonValueKind.Object
+                ? data
+                : root;
+            return payload.Clone();
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or NotSupportedException
+                                   || (ex is OperationCanceledException && !cancellationToken.IsCancellationRequested))
+        {
+            _logger.LogWarning(ex, "User service call failed.");
+            throw new DomainException("USER_SERVICE_UNAVAILABLE", "The user service is unavailable.", 503);
+        }
+    }
+
+    private static UserAuctionDepositProfile ParseDepositProfile(JsonElement payload, Guid requested)
+    {
+        if (payload.ValueKind != JsonValueKind.Object)
+            throw InvalidResponse("the profile is not an object");
+        EnsureSameUser(payload, requested);
+
+        var status = OptionalString(payload, "accountStatus")?.ToUpperInvariant();
+        if (status is not ("ACTIVE" or "BANNED" or "DELETED"))
+            throw InvalidResponse("'accountStatus' is missing or unknown");
+
+        int? reputation = null;
+        if (payload.TryGetProperty("reputationScore", out var score) && score.ValueKind == JsonValueKind.Number)
+        {
+            if (!score.TryGetInt32(out var scoreValue))
+                throw InvalidResponse("'reputationScore' is not a whole number");
+            reputation = scoreValue;
+        }
+
+        var isNewUser = RequireBool(payload, "isNewUser");
+
+        if (!payload.TryGetProperty("violationStreak", out var streak) || streak.ValueKind != JsonValueKind.Number ||
+            !streak.TryGetInt32(out var streakValue) || streakValue < 0)
+            throw InvalidResponse("'violationStreak' is missing or is not a whole number");
+
+        var restricted = false;
+        string? restrictionType = null;
+        DateTimeOffset? until = null;
+        string? reason = null;
+        if (payload.TryGetProperty("auctionRestriction", out var restriction) && restriction.ValueKind == JsonValueKind.Object)
+        {
+            restricted = RequireBool(restriction, "isRestricted");
+            restrictionType = OptionalString(restriction, "type");
+            reason = OptionalString(restriction, "reason");
+            if (OptionalString(restriction, "until") is { } untilText && DateTimeOffset.TryParse(
+                    untilText, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal, out var parsed))
+                until = parsed;
+        }
+
+        return new UserAuctionDepositProfile(
+            requested, status, reputation, isNewUser, streakValue, restricted, restrictionType, until, reason);
     }
 
     private static bool HasReason(JsonElement payload) =>

@@ -23,6 +23,9 @@ services:
       InternalSecurity__ServiceKey: "${INTERNAL_SERVICE_SECRET:-eaT0Ombups70WJzd85CBBpp8rAno55SxKn1qvYBGH9e}"
       Catalog__BaseUrl: "http://nexus-catalog-service:8002"
       User__BaseUrl: "http://nexus-user-service:8001"
+      Wallet__BaseUrl: "http://nexus-wallet-service:8008"
+      Deposit__CallbackBaseUrl: "http://nexus-auction-service:8005"
+      Deposit__AllowedReturnUrlHosts__0: "localhost"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4317}"
     restart: unless-stopped
 
