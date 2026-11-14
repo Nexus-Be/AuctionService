@@ -15,7 +15,8 @@ using Microsoft.Extensions.Logging;
 public enum CatalogSyncAction
 {
     UnlockProduct,
-    MarkAuctioned
+    MarkAuctioned,
+    RevertAuctioned
 }
 
 /// <summary>Một việc đồng bộ đang chờ trong hàng đợi.</summary>
@@ -46,6 +47,9 @@ public sealed class CatalogSyncQueue : ICatalogSync
 
     public void MarkProductAuctioned(Guid productId, Guid auctionId) =>
         Enqueue(new CatalogSyncItem(CatalogSyncAction.MarkAuctioned, productId, auctionId));
+
+    public void RevertProductAuctioned(Guid productId, Guid auctionId) =>
+        Enqueue(new CatalogSyncItem(CatalogSyncAction.RevertAuctioned, productId, auctionId));
 
     private void Enqueue(CatalogSyncItem item)
     {
@@ -131,7 +135,7 @@ public sealed class CatalogSyncWorker : BackgroundService
             {
                 using var scope = _scopes.CreateScope();
 
-                if (item.Action == CatalogSyncAction.UnlockProduct)
+                if (item.Action is CatalogSyncAction.UnlockProduct or CatalogSyncAction.RevertAuctioned)
                 {
                     var db = scope.ServiceProvider.GetRequiredService<IAuctionDbContext>();
                     var heldByAnotherAuction = await db.ProductOpenAuctions
@@ -140,17 +144,25 @@ public sealed class CatalogSyncWorker : BackgroundService
                     if (heldByAnotherAuction)
                     {
                         _logger.LogInformation(
-                            "Product {ProductId} is held by another auction now: the unlock of auction {AuctionId} was skipped.",
-                            item.ProductId, item.AuctionId);
+                            "Product {ProductId} is held by another auction now: {Action} of auction {AuctionId} was skipped.",
+                            item.ProductId, item.Action, item.AuctionId);
                         return;
                     }
                 }
 
                 var catalog = scope.ServiceProvider.GetRequiredService<ICatalogClient>();
-                if (item.Action == CatalogSyncAction.UnlockProduct)
-                    await catalog.UnlockProductFromAuctionAsync(item.ProductId, cancellationToken);
-                else
-                    await catalog.MarkProductAuctionedAsync(item.ProductId, cancellationToken);
+                switch (item.Action)
+                {
+                    case CatalogSyncAction.UnlockProduct:
+                        await catalog.UnlockProductFromAuctionAsync(item.ProductId, cancellationToken);
+                        break;
+                    case CatalogSyncAction.MarkAuctioned:
+                        await catalog.MarkProductAuctionedAsync(item.ProductId, cancellationToken);
+                        break;
+                    case CatalogSyncAction.RevertAuctioned:
+                        await catalog.RevertProductAuctionedAsync(item.ProductId, cancellationToken);
+                        break;
+                }
 
                 _logger.LogInformation(
                     "Catalog {Action} done for product {ProductId} (auction {AuctionId}).", item.Action, item.ProductId, item.AuctionId);

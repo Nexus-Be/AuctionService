@@ -37,7 +37,27 @@ public interface ICatalogClient
 
     /// <summary>Marks the product as sold by auction (Catalog: Auctioned, permanent). Idempotent. Throws 503 (temporary) or 502 (permanent).</summary>
     Task MarkProductAuctionedAsync(Guid productId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reverts a previously auctioned product back to Active (Catalog: POST /api/v1/internal/products/{productId}/revert-auctioned).
+    /// Used when an order is cancelled or rejected after MarkProductAuctionedAsync was already called. Idempotent.
+    /// </summary>
+    Task RevertProductAuctionedAsync(Guid productId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Checks whether a product is still eligible for auction (Catalog: GET /api/v1/internal/products/{productId}/auction-eligibility),
+    /// e.g. to verify that the product was not banned, suspended or deleted by an admin before offering or accepting a second-chance purchase.
+    /// When <paramref name="allowInAuction"/> is true, a product currently locked in <c>InAuction</c> by this auction is treated as eligible.
+    /// </summary>
+    Task<CatalogProductEligibility> CheckProductAuctionEligibilityAsync(
+        Guid productId, bool allowInAuction = false, CancellationToken cancellationToken = default);
 }
+
+public sealed record CatalogProductEligibility(
+    Guid ProductId,
+    bool IsEligible,
+    string? Status,
+    string? Reason);
 
 public sealed record CatalogVariantCheck(
     Guid VariantId,

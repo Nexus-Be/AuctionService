@@ -14,4 +14,7 @@ public interface ICatalogSync
 
     /// <summary>Chốt bán sản phẩm (Catalog: Auctioned, vĩnh viễn) khi Seller đã chấp nhận đơn (callback SellerAccepted của Commerce).</summary>
     void MarkProductAuctioned(Guid productId, Guid auctionId);
+
+    /// <summary>Hoàn trả sản phẩm từ trạng thái Auctioned về Active khi đơn hàng bị huỷ hoặc từ chối sau khi đã lỡ chốt bán.</summary>
+    void RevertProductAuctioned(Guid productId, Guid auctionId);
 }

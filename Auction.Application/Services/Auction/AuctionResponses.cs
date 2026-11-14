@@ -66,3 +66,18 @@ public sealed record WinnerOfferResponse(
     decimal Amount,
     DateTimeOffset RespondedAt,
     DateTimeOffset? PaymentDeadlineAt);
+
+/// <summary>Phản hồi khi người về nhì chấp nhận lời mời mua lại (API 07).</summary>
+public sealed record SecondChanceAcceptResponse(
+    Guid OfferId,
+    string Status,
+    string SettlementStatus,
+    Guid? OrderId,
+    decimal AmountToPay,
+    DateTimeOffset PaymentDeadlineAt);
+
+/// <summary>Phản hồi khi người về nhì từ chối lời mời mua lại (API 08).</summary>
+public sealed record SecondChanceDeclineResponse(
+    Guid OfferId,
+    string Status,
+    string AuctionStatus);

@@ -215,6 +215,42 @@ public class AuctionsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Người về nhì chấp nhận mua theo giá bid của chính mình sau khi người thắng trước không thanh toán (API 07).</summary>
+    [HttpPost("{id:guid}/second-chance/accept")]
+    [ProducesResponseType(typeof(SecondChanceAcceptResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> AcceptSecondChance(
+        [FromRoute] Guid id,
+        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
+        [FromBody] AcceptSecondChanceRequest request,
+        CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("buyer") && !this.HasRole("seller"))
+            return this.ForbiddenError("Only buyer or seller accounts can respond to second-chance offers.");
+
+        var result = await _auctionService.AcceptSecondChanceOfferAsync(
+            CreateActor(userId), id, idempotencyKey, request, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Người về nhì từ chối lời mời mua lại (API 08). Phiên chuyển sang Failed, không tính vi phạm Streak.</summary>
+    [HttpPost("{id:guid}/second-chance/decline")]
+    [ProducesResponseType(typeof(SecondChanceDeclineResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> DeclineSecondChance(
+        [FromRoute] Guid id,
+        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
+        [FromBody] DeclineWinnerOfferRequest? request,
+        CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("buyer") && !this.HasRole("seller"))
+            return this.ForbiddenError("Only buyer or seller accounts can respond to second-chance offers.");
+
+        var result = await _auctionService.DeclineSecondChanceOfferAsync(
+            CreateActor(userId), id, idempotencyKey, request ?? new DeclineWinnerOfferRequest(null), ct);
+        return Ok(result);
+    }
+
     /// <summary>Bidder lấy các lời mời trở thành người thắng của mình (mới nhất trước), lọc theo trạng thái lời mời.</summary>
     [HttpGet("~/api/v1/me/auction-offers")]
     [ProducesResponseType(typeof(PagedData<WinnerOfferDto>), StatusCodes.Status200OK)]

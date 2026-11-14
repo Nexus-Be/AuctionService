@@ -689,12 +689,19 @@ public sealed class DepositService : IDepositService
         if (!auctionExists)
             throw new EntityNotFoundException("AUCTION_NOT_FOUND", "Auction", auctionId);
 
-        var isRestricted = false;
+        string? userBlockReason = null;
         try
         {
             var profile = await _users.GetAuctionDepositProfileAsync(actor.UserId, bypassCache: false, cancellationToken);
-            if (profile.IsRestricted || string.Equals(profile.AccountStatus, "BANNED", StringComparison.OrdinalIgnoreCase))
-                isRestricted = true;
+            if (string.Equals(profile.AccountStatus, "PENDINGVERIFICATION", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(profile.AccountStatus, "PENDING_VERIFICATION", StringComparison.OrdinalIgnoreCase))
+            {
+                userBlockReason = "ACCOUNT_NOT_VERIFIED";
+            }
+            else if (profile.IsRestricted || !string.Equals(profile.AccountStatus, "ACTIVE", StringComparison.OrdinalIgnoreCase))
+            {
+                userBlockReason = "BIDDER_RESTRICTED";
+            }
         }
         catch (DomainException)
         {
@@ -718,13 +725,13 @@ public sealed class DepositService : IDepositService
                 CapturedAt: null,
                 CapturePurpose: null,
                 CanBid: false,
-                BlockReason: isRestricted ? "BIDDER_RESTRICTED" : "DEPOSIT_REQUIRED");
+                BlockReason: userBlockReason ?? "DEPOSIT_REQUIRED");
         }
 
         var (canBid, blockReason) = deposit.Status switch
         {
-            DepositStatus.Authorized when !isRestricted => (true, (string?)null),
-            DepositStatus.Authorized => (false, "BIDDER_RESTRICTED"),
+            DepositStatus.Authorized when userBlockReason is null => (true, (string?)null),
+            DepositStatus.Authorized => (false, userBlockReason),
             DepositStatus.Pending => (false, "DEPOSIT_PENDING"),
             DepositStatus.Failed => (false, "DEPOSIT_FAILED"),
             DepositStatus.Expired => (false, "DEPOSIT_EXPIRED"),

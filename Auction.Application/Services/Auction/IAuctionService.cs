@@ -58,6 +58,14 @@ public interface IAuctionService
     /// <summary>Bidder được mời từ chối lời mời. Phiên chuyển sang Failed và sản phẩm được nhả.</summary>
     Task<WinnerOfferResponse> DeclineWinnerOfferAsync(ActorContext actor, Guid auctionId, Guid offerId, DeclineWinnerOfferRequest request, CancellationToken cancellationToken = default);
 
+    /// <summary>Người về nhì chấp nhận lời mời mua theo giá bid của chính mình (API 07: POST /api/v1/auctions/{id}/second-chance/accept).</summary>
+    Task<SecondChanceAcceptResponse> AcceptSecondChanceOfferAsync(
+        ActorContext actor, Guid auctionId, string? idempotencyKey, AcceptSecondChanceRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>Người về nhì từ chối lời mời mua lại (API 08: POST /api/v1/auctions/{id}/second-chance/decline).</summary>
+    Task<SecondChanceDeclineResponse> DeclineSecondChanceOfferAsync(
+        ActorContext actor, Guid auctionId, string? idempotencyKey, DeclineWinnerOfferRequest request, CancellationToken cancellationToken = default);
+
     /// <summary>Lấy các lời mời của chính bidder (mới nhất trước, có phân trang, lọc theo trạng thái lời mời).</summary>
     Task<PagedData<WinnerOfferDto>> ListMyWinnerOffersAsync(Guid bidderId, int page = 1, int pageSize = 20, string? status = null, CancellationToken cancellationToken = default);
 
