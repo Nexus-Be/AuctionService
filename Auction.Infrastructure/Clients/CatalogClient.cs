@@ -149,6 +149,132 @@ public sealed class CatalogClient : ICatalogClient
             : InvalidResponse($"mark-auctioned answered HTTP {status} ({code})");
     }
 
+    public async Task RevertProductAuctionedAsync(Guid productId, CancellationToken cancellationToken = default)
+    {
+        var (status, code) = await PostProductCommandAsync(productId, "revert-auctioned", cancellationToken);
+        if (status is >= 200 and < 300)
+            return;
+
+        // Nếu sản phẩm không ở trạng thái Auctioned (ví dụ vẫn đang InAuction hoặc đã về Active trước đó), đảm bảo sản phẩm được mở khoá về Active.
+        if (code is "PRODUCT_NOT_AUCTIONED" or "PRODUCT_ALREADY_ACTIVE")
+        {
+            await UnlockProductFromAuctionAsync(productId, cancellationToken);
+            return;
+        }
+
+        if (code is "PRODUCT_NOT_FOUND")
+        {
+            _logger.LogInformation("Product {ProductId} was not found in Catalog when reverting auctioned state ({Code}).", productId, code);
+            return;
+        }
+
+        throw status >= 500
+            ? Unavailable(new HttpRequestException($"Catalog answered HTTP {status} to revert-auctioned."))
+            : InvalidResponse($"revert-auctioned answered HTTP {status} ({code})");
+    }
+
+    public async Task<CatalogProductEligibility> CheckProductAuctionEligibilityAsync(
+        Guid productId, bool allowInAuction = false, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var response = await _http.GetAsync($"{InternalProductPath}{productId}/auction-eligibility", cancellationToken);
+
+            if (response.StatusCode == HttpStatusCode.NotFound)
+                return new CatalogProductEligibility(productId, false, "NotFound", "PRODUCT_NOT_FOUND");
+
+            if ((int)response.StatusCode >= 500)
+                throw Unavailable(new HttpRequestException($"Catalog answered HTTP {(int)response.StatusCode} to auction-eligibility."));
+
+            var json = await response.Content.ReadAsStringAsync(cancellationToken);
+            using var document = JsonDocument.Parse(json);
+            var payload = document.RootElement;
+
+            if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("success", out var success))
+            {
+                if (success.ValueKind == JsonValueKind.False)
+                {
+                    var errCode = TryGetString(payload, "errorCode") ?? TryGetString(payload, "code") ?? "PRODUCT_NOT_ELIGIBLE";
+                    if (allowInAuction && errCode is "PRODUCT_ALREADY_IN_AUCTION" or "PRODUCT_IN_AUCTION")
+                        return new CatalogProductEligibility(productId, true, "InAuction", null);
+
+                    return new CatalogProductEligibility(productId, false, null, errCode);
+                }
+
+                if (payload.TryGetProperty("data", out var dataElement) && dataElement.ValueKind == JsonValueKind.Object)
+                    payload = dataElement;
+            }
+
+            var status = TryGetString(payload, "status") ?? TryGetString(payload, "productStatus");
+            var reason = TryGetString(payload, "reason") ?? TryGetString(payload, "ineligibleReason") ?? TryGetString(payload, "blockReason");
+            var isBannedOrDeleted =
+                TryGetBool(payload, "isBanned") == true ||
+                TryGetBool(payload, "isDeleted") == true ||
+                IsForbiddenProductState(status) ||
+                IsForbiddenProductReason(reason);
+
+            if (isBannedOrDeleted)
+                return new CatalogProductEligibility(productId, false, status, reason ?? "PRODUCT_BANNED");
+
+            var rawEligible = TryGetBool(payload, "isEligible")
+                ?? TryGetBool(payload, "eligible")
+                ?? TryGetBool(payload, "isPurchasable")
+                ?? response.IsSuccessStatusCode;
+
+            if (!rawEligible && allowInAuction)
+            {
+                var isLockedInAuction =
+                    string.Equals(status, "InAuction", StringComparison.OrdinalIgnoreCase) ||
+                    reason is "PRODUCT_ALREADY_IN_AUCTION" or "PRODUCT_IN_AUCTION" or "PRODUCT_NOT_ACTIVE";
+
+                if (isLockedInAuction)
+                    return new CatalogProductEligibility(productId, true, status ?? "InAuction", null);
+            }
+
+            return new CatalogProductEligibility(productId, rawEligible, status, reason);
+        }
+        catch (Exception ex) when (IsTransportFailure(ex, cancellationToken))
+        {
+            throw Unavailable(ex);
+        }
+    }
+
+    private static string? TryGetString(JsonElement element, string propertyName)
+    {
+        if (element.ValueKind == JsonValueKind.Object &&
+            element.TryGetProperty(propertyName, out var prop) &&
+            prop.ValueKind == JsonValueKind.String)
+        {
+            return prop.GetString();
+        }
+        return null;
+    }
+
+    private static bool? TryGetBool(JsonElement element, string propertyName)
+    {
+        if (element.ValueKind == JsonValueKind.Object &&
+            element.TryGetProperty(propertyName, out var prop) &&
+            prop.ValueKind is JsonValueKind.True or JsonValueKind.False)
+        {
+            return prop.GetBoolean();
+        }
+        return null;
+    }
+
+    private static bool IsForbiddenProductState(string? status) =>
+        status is not null &&
+        (status.Equals("Banned", StringComparison.OrdinalIgnoreCase) ||
+         status.Equals("Suspended", StringComparison.OrdinalIgnoreCase) ||
+         status.Equals("Deleted", StringComparison.OrdinalIgnoreCase) ||
+         status.Equals("Rejected", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsForbiddenProductReason(string? reason) =>
+        reason is not null &&
+        (reason.Contains("BAN", StringComparison.OrdinalIgnoreCase) ||
+         reason.Contains("SUSPEND", StringComparison.OrdinalIgnoreCase) ||
+         reason.Contains("DELETE", StringComparison.OrdinalIgnoreCase) ||
+         reason.Equals("NOT_FOR_AUCTION", StringComparison.OrdinalIgnoreCase));
+
     /// <summary>Gọi một lệnh không có body của sản phẩm (lock-auction, unlock-auction, mark-auctioned). Trả mã HTTP và errorCode của Catalog (nếu có).</summary>
     private async Task<(int Status, string? ErrorCode)> PostProductCommandAsync(
         Guid productId, string command, CancellationToken cancellationToken)

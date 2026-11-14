@@ -8,13 +8,16 @@ using global::Auction.Domain.Exceptions;
 public static class DepositProfileGuard
 {
     /// <summary>
-    /// A banned account, a deleted account and a bidder under an auction restriction cannot join (deposit or bid).
+    /// An unverified account, a banned account, a deleted account and a bidder under an auction restriction cannot join (deposit or bid).
     /// Reputation never blocks here: it only changes the size of the deposit.
     /// </summary>
     public static void EnsureCanJoin(UserAuctionDepositProfile profile)
     {
         switch (profile.AccountStatus.ToUpperInvariant())
         {
+            case "PENDINGVERIFICATION":
+            case "PENDING_VERIFICATION":
+                throw new DomainException("ACCOUNT_NOT_VERIFIED", "The account has not been verified.", 403);
             case "BANNED":
                 throw new DomainException("ACCOUNT_BANNED", "The account has been banned.", 403);
             case "DELETED":

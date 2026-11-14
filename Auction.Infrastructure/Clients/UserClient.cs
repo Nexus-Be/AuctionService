@@ -22,6 +22,7 @@ public sealed class UserClient : IUserClient
     private const string VerifyBidPath = "/api/v1/internal/users/verify-bid-eligibility";
     private const string BatchInfoPath = "/api/v1/internal/users/batch-public-info";
     private const string DepositProfilePathFormat = "/api/v1/internal/users/{0}/auction-deposit-profile";
+    private const string RecordViolationPathFormat = "/api/v1/internal/users/{0}/auction-violations";
     private const int BatchLimit = 100;
 
     // The deposit profile is read on every bid, so it is cached briefly. A newly restricted bidder can still bid for up to this long.
@@ -148,6 +149,80 @@ public sealed class UserClient : IUserClient
         return result;
     }
 
+    public async Task<RecordAuctionViolationResult> RecordAuctionViolationAsync(
+        RecordAuctionViolationCommand command, CancellationToken cancellationToken = default)
+    {
+        var cacheKey = $"user-deposit-profile:{command.UserId:N}";
+        _cache.Remove(cacheKey);
+
+        if (_options.BypassUserCheck)
+        {
+            _logger.LogWarning("BypassUserCheck is on: recording auction violation was skipped for user {UserId}.", command.UserId);
+            return new RecordAuctionViolationResult(Guid.NewGuid(), true, 0, 1, 100, 95, "Warning", null);
+        }
+
+        var path = string.Format(RecordViolationPathFormat, command.UserId);
+        var body = new RecordViolationBody(
+            command.ViolationType,
+            command.AuctionId,
+            command.OrderId,
+            command.OccurredAt,
+            command.DepositForfeitedAmount);
+
+        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutSource.CancelAfter(_defaultTimeout);
+
+        try
+        {
+            using var content = new StringContent(
+                JsonSerializer.Serialize(body, JsonOptions), Encoding.UTF8, "application/json");
+            using var response = await _http.PostAsync(path, content, timeoutSource.Token);
+
+            if (response.StatusCode == HttpStatusCode.NotFound)
+                throw new DomainException("USER_NOT_FOUND", "The user was not found.", 404);
+
+            if (!response.IsSuccessStatusCode)
+                throw new HttpRequestException($"User service answered {(int)response.StatusCode} to auction-violations.");
+
+            var text = await response.Content.ReadAsStringAsync(timeoutSource.Token);
+            using var document = JsonDocument.Parse(text);
+            var root = document.RootElement;
+            var payload = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("data", out var data) &&
+                          data.ValueKind == JsonValueKind.Object
+                ? data
+                : root;
+
+            var violationId = OptionalGuid(payload, "violationId") ?? Guid.Empty;
+            var created = HasProperty(payload, "created") && RequireBool(payload, "created");
+            var previousStreak = OptionalInt(payload, "previousStreak") ?? 0;
+            var newStreak = OptionalInt(payload, "newStreak") ?? 0;
+            var repBefore = OptionalInt(payload, "reputationBefore") ?? 0;
+            var repAfter = OptionalInt(payload, "reputationAfter") ?? 0;
+
+            string? sanctionType = null;
+            DateTimeOffset? sanctionUntil = null;
+            if (payload.TryGetProperty("sanction", out var sanction) && sanction.ValueKind == JsonValueKind.Object)
+            {
+                sanctionType = OptionalString(sanction, "type");
+                if (OptionalString(sanction, "until") is { } untilText && DateTimeOffset.TryParse(
+                        untilText, System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.AssumeUniversal, out var parsedUntil))
+                {
+                    sanctionUntil = parsedUntil;
+                }
+            }
+
+            return new RecordAuctionViolationResult(
+                violationId, created, previousStreak, newStreak, repBefore, repAfter, sanctionType, sanctionUntil);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or NotSupportedException
+                                   || (ex is OperationCanceledException && !cancellationToken.IsCancellationRequested))
+        {
+            _logger.LogWarning(ex, "User service call failed when recording auction violation for user {UserId}.", command.UserId);
+            throw new DomainException("USER_SERVICE_UNAVAILABLE", "The user service is unavailable.", 503);
+        }
+    }
+
     // ------------------------------------------------------------------ HTTP
 
     /// <summary>Posts a body and returns the useful part of the answer (the "data" object when there is one).</summary>
@@ -230,8 +305,10 @@ public sealed class UserClient : IUserClient
             throw InvalidResponse("the profile is not an object");
         EnsureSameUser(payload, requested);
 
-        var status = OptionalString(payload, "accountStatus")?.ToUpperInvariant();
-        if (status is not ("ACTIVE" or "BANNED" or "DELETED"))
+        var status = OptionalString(payload, "accountStatus")?
+            .Replace("_", string.Empty, StringComparison.Ordinal)
+            .ToUpperInvariant();
+        if (status is not ("PENDINGVERIFICATION" or "ACTIVE" or "BANNED" or "DELETED"))
             throw InvalidResponse("'accountStatus' is missing or unknown");
 
         int? reputation = null;
@@ -297,6 +374,14 @@ public sealed class UserClient : IUserClient
     private static Guid? OptionalGuid(JsonElement payload, string name) =>
         OptionalString(payload, name) is { } text && Guid.TryParse(text, out var id) ? id : null;
 
+    private static int? OptionalInt(JsonElement payload, string name) =>
+        payload.ValueKind == JsonValueKind.Object &&
+        payload.TryGetProperty(name, out var value) &&
+        value.ValueKind == JsonValueKind.Number &&
+        value.TryGetInt32(out var number)
+            ? number
+            : null;
+
     private static void EnsureSameUser(JsonElement payload, Guid requested)
     {
         var returned = OptionalGuid(payload, "userId");
@@ -312,4 +397,11 @@ public sealed class UserClient : IUserClient
     private sealed record BidEligibilityQuery(Guid UserId);
 
     private sealed record BatchInfoQuery(Guid[] UserIds);
+
+    private sealed record RecordViolationBody(
+        string ViolationType,
+        Guid AuctionId,
+        Guid OrderId,
+        DateTimeOffset OccurredAt,
+        decimal DepositForfeitedAmount);
 }
