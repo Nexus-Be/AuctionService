@@ -13,6 +13,7 @@ public class AuctionWinnerOfferConfiguration : IEntityTypeConfiguration<AuctionW
         builder.HasKey(x => x.Id);
         builder.Property(x => x.Amount).HasPrecision(18, 2);
         builder.Property(x => x.ResponseReason).HasMaxLength(1000);
+        builder.Property(x => x.LastError).HasMaxLength(500);
         builder.HasIndex(x => x.AuctionId).IsUnique();
         builder.HasIndex(x => new { x.Status, x.ExpiresAt });
 

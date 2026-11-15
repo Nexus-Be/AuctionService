@@ -17,6 +17,10 @@ public class AuctionDepositConfiguration : IEntityTypeConfiguration<AuctionDepos
         builder.Property(x => x.PaymentRedirectUrl).HasMaxLength(2000);
         builder.Property(x => x.FailureCode).HasMaxLength(100);
         builder.Property(x => x.ReleaseReason).HasMaxLength(50);
+        builder.Property(x => x.CapturePurpose).HasMaxLength(50);
+        builder.Property(x => x.PendingPurpose).HasMaxLength(50);
+        builder.Property(x => x.LastError).HasMaxLength(500);
+        builder.Property(x => x.LastGatewayEventId).HasMaxLength(200);
         builder.Property(x => x.RowVersion).IsConcurrencyToken();
 
         builder.HasIndex(x => new { x.AuctionId, x.BidderId }).IsUnique();

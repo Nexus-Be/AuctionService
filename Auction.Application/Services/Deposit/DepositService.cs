@@ -390,6 +390,7 @@ public sealed class DepositService : IDepositService
 
         if (applied)
         {
+            deposit.LastGatewayEventId = eventId;
             deposit.UpdatedAt = now;
             deposit.RowVersion += 1;
             _dbContext.AddAuditLog(
@@ -481,7 +482,9 @@ public sealed class DepositService : IDepositService
                     deposit.Status = DepositStatus.Failed;
                     deposit.FailureCode = "AMOUNT_MISMATCH";
                     deposit.ReleasePending = true;
+                    deposit.PendingAction = DepositPendingAction.Release;
                     deposit.ReleaseReason = "AMOUNT_MISMATCH";
+                    deposit.NextRetryAt = now;
                     action = AuditAction.DepositFail;
                     return true;
                 }
@@ -492,7 +495,9 @@ public sealed class DepositService : IDepositService
                 {
                     deposit.Status = DepositStatus.Released;
                     deposit.ReleasePending = true;
+                    deposit.PendingAction = DepositPendingAction.Release;
                     deposit.ReleaseReason = "LATE_AUTHORIZATION";
+                    deposit.NextRetryAt = now;
                     action = AuditAction.DepositRelease;
                     return true;
                 }
@@ -536,6 +541,10 @@ public sealed class DepositService : IDepositService
                 deposit.ReleasedAt = _clock.GetUtcNow();
 
             deposit.ReleasePending = false;
+            deposit.PendingAction = DepositPendingAction.None;
+            deposit.NextRetryAt = null;
+            deposit.LastError = null;
+            deposit.NeedsAttention = false;
             deposit.UpdatedAt = _clock.GetUtcNow();
             deposit.RowVersion += 1;
             await _dbContext.SaveChangesAsync(cancellationToken);
@@ -545,6 +554,14 @@ public sealed class DepositService : IDepositService
             _logger.LogWarning(
                 "Release of hold {HoldId} for deposit {DepositId} failed ({ErrorCode}). It stays pending and must be retried.",
                 deposit.GatewayReference, deposit.Id, ex.ErrorCode);
+            RecordDepositActionFailure(deposit, ex.Message, _clock.GetUtcNow());
+            try
+            {
+                await _dbContext.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException)
+            {
+            }
         }
         catch (DbUpdateException ex)
         {
@@ -646,10 +663,16 @@ public sealed class DepositService : IDepositService
 
         var items = rows.Select(d =>
         {
-            string? pendingAction = d.ReleasePending ? "RELEASE_RETRYING" : null;
-            bool needsAttention = d.AttemptCount >= 10;
-            string? capturePurpose = d.Status == DepositStatus.Captured ? "OrderPayment" : null;
-            DateTimeOffset? capturedAt = d.Status == DepositStatus.Captured ? d.UpdatedAt : null;
+            string? pendingAction = d.PendingAction switch
+            {
+                DepositPendingAction.Release => "RELEASE_RETRYING",
+                DepositPendingAction.Capture => "CAPTURE_RETRYING",
+                DepositPendingAction.Refund => "REFUND_RETRYING",
+                _ => d.ReleasePending ? "RELEASE_RETRYING" : null
+            };
+            bool needsAttention = d.NeedsAttention || d.AttemptCount > 10;
+            string? capturePurpose = d.CapturePurpose ?? (d.Status == DepositStatus.Captured ? "OrderPayment" : null);
+            DateTimeOffset? capturedAt = d.CapturedAt ?? (d.Status == DepositStatus.Captured ? d.UpdatedAt : null);
 
             return new AdminAuctionDepositItemDto(
                 d.Id,
@@ -739,8 +762,8 @@ public sealed class DepositService : IDepositService
             _ => (false, "DEPOSIT_REQUIRED")
         };
 
-        string? capturePurpose = deposit.Status == DepositStatus.Captured ? "OrderPayment" : null;
-        DateTimeOffset? capturedAt = deposit.Status == DepositStatus.Captured ? deposit.UpdatedAt : null;
+        string? capturePurpose = deposit.CapturePurpose ?? (deposit.Status == DepositStatus.Captured ? "OrderPayment" : null);
+        DateTimeOffset? capturedAt = deposit.CapturedAt ?? (deposit.Status == DepositStatus.Captured ? deposit.UpdatedAt : null);
 
         return new MyDepositResponse(
             deposit.Id,
@@ -756,7 +779,7 @@ public sealed class DepositService : IDepositService
             blockReason);
     }
 
-    // ------------------------------------------------------------------ Release helper for auction cancel / end
+    // ------------------------------------------------------------------ Release & background retry helpers (Overview 4.1 & v0.4)
 
     /// <summary>
     /// Giải phóng các cọc đã được đánh dấu ReleasePending của một phiên đấu giá (fast path sau khi commit huỷ phiên hoặc kết thúc phiên).
@@ -765,41 +788,336 @@ public sealed class DepositService : IDepositService
     public async Task ReleasePendingDepositsForAuctionAsync(Guid auctionId, CancellationToken cancellationToken = default)
     {
         var pendingDeposits = await _dbContext.AuctionDeposits
-            .Where(d => d.AuctionId == auctionId && d.ReleasePending && !d.IsDeleted)
+            .Where(d => d.AuctionId == auctionId && (d.ReleasePending || d.PendingAction == DepositPendingAction.Release) && !d.IsDeleted)
             .ToListAsync(cancellationToken);
 
         foreach (var deposit in pendingDeposits)
         {
-            if (string.IsNullOrWhiteSpace(deposit.GatewayReference))
+            await ProcessSingleDepositReleaseAsync(deposit, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Job quét định kỳ (Overview 4.1 &amp; v0.4):
+    /// 1) Thực hiện lại các việc nền trên cọc (Release, Capture, Refund) đang Pending có NextRetryAt &lt;= now và NeedsAttention = false.
+    /// 2) Đồng bộ các cọc bị treo ở trạng thái Pending (do timeout lúc gọi W1 ở API 02) qua W4 by-reference; quá 10 phút không có hold thì chuyển Failed.
+    /// </summary>
+    public async Task ProcessDueDepositRetriesAsync(int limit, CancellationToken cancellationToken = default)
+    {
+        var now = _clock.GetUtcNow();
+
+        var dueDeposits = await _dbContext.AuctionDeposits
+            .Where(d => !d.IsDeleted
+                        && !d.NeedsAttention
+                        && (d.PendingAction != DepositPendingAction.None || d.ReleasePending)
+                        && (d.NextRetryAt == null || d.NextRetryAt <= now))
+            .OrderBy(d => d.NextRetryAt)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
+        foreach (var deposit in dueDeposits)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var action = deposit.PendingAction != DepositPendingAction.None
+                ? deposit.PendingAction
+                : DepositPendingAction.Release;
+
+            switch (action)
             {
-                DepositHoldSnapshot? snapshot;
+                case DepositPendingAction.Release:
+                    await ProcessSingleDepositReleaseAsync(deposit, cancellationToken);
+                    break;
+                case DepositPendingAction.Capture:
+                    await ProcessSingleDepositCaptureAsync(deposit, cancellationToken);
+                    break;
+                case DepositPendingAction.Refund:
+                    await ProcessSingleDepositRefundAsync(deposit, cancellationToken);
+                    break;
+            }
+        }
+
+        // Reconcile deposits left in Pending due to W1 timeout (v0.4 section 4.2 & 5.4)
+        var stuckPending = await _dbContext.AuctionDeposits
+            .Where(d => !d.IsDeleted
+                        && d.Status == DepositStatus.Pending
+                        && !d.ReleasePending
+                        && d.PendingAction == DepositPendingAction.None
+                        && d.UpdatedAt <= now.AddSeconds(-30))
+            .OrderBy(d => d.UpdatedAt)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
+        foreach (var deposit in stuckPending)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await ReconcilePendingDepositAsync(deposit, now, cancellationToken);
+        }
+    }
+
+    private async Task ProcessSingleDepositReleaseAsync(AuctionDeposit deposit, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(deposit.GatewayReference))
+        {
+            DepositHoldSnapshot? snapshot;
+            try
+            {
+                snapshot = await _wallet.GetDepositHoldByReferenceAsync(deposit.Id, cancellationToken);
+            }
+            catch (DomainException ex) when (ex.StatusCode >= 500)
+            {
+                _logger.LogWarning(
+                    "Lookup by reference for pending deposit {DepositId} failed ({ErrorCode}). Release stays pending and must be retried.",
+                    deposit.Id, ex.ErrorCode);
+                RecordDepositActionFailure(deposit, ex.Message, _clock.GetUtcNow());
                 try
                 {
-                    snapshot = await _wallet.GetDepositHoldByReferenceAsync(deposit.Id, cancellationToken);
-                }
-                catch (DomainException ex) when (ex.StatusCode >= 500)
-                {
-                    _logger.LogWarning(
-                        "Lookup by reference for pending deposit {DepositId} failed ({ErrorCode}). Release stays pending and must be retried.",
-                        deposit.Id, ex.ErrorCode);
-                    continue;
-                }
-
-                if (snapshot is null || snapshot.Status is DepositHoldState.Released or DepositHoldState.Voided or DepositHoldState.Expired or DepositHoldState.Failed)
-                {
-                    deposit.ReleasePending = false;
-                    deposit.ReleasedAt = _clock.GetUtcNow();
-                    deposit.UpdatedAt = _clock.GetUtcNow();
-                    deposit.RowVersion += 1;
                     await _dbContext.SaveChangesAsync(cancellationToken);
-                    continue;
                 }
+                catch (DbUpdateException)
+                {
+                }
+                return;
+            }
 
+            if (snapshot is null || snapshot.Status is DepositHoldState.Released or DepositHoldState.Voided or DepositHoldState.Expired or DepositHoldState.Failed)
+            {
+                var now = _clock.GetUtcNow();
+                deposit.ReleasePending = false;
+                deposit.PendingAction = DepositPendingAction.None;
+                deposit.NextRetryAt = null;
+                deposit.LastError = null;
+                deposit.NeedsAttention = false;
+                deposit.ReleasedAt = now;
+                deposit.UpdatedAt = now;
+                deposit.RowVersion += 1;
+                await _dbContext.SaveChangesAsync(cancellationToken);
+                return;
+            }
+
+            deposit.GatewayReference = snapshot.HoldId;
+        }
+
+        await TryReleaseAsync(deposit, cancellationToken);
+    }
+
+    private async Task ProcessSingleDepositCaptureAsync(AuctionDeposit deposit, CancellationToken cancellationToken)
+    {
+        var now = _clock.GetUtcNow();
+        try
+        {
+            if (string.IsNullOrWhiteSpace(deposit.GatewayReference))
+            {
+                var snapshot = await _wallet.GetDepositHoldByReferenceAsync(deposit.Id, cancellationToken);
+                if (snapshot is null)
+                {
+                    RecordDepositActionFailure(deposit, "Hold reference was not found in Wallet for capture.", now);
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                    return;
+                }
                 deposit.GatewayReference = snapshot.HoldId;
             }
 
-            await TryReleaseAsync(deposit, cancellationToken);
+            var purpose = string.IsNullOrWhiteSpace(deposit.PendingPurpose) ? "OrderPayment" : deposit.PendingPurpose!;
+            var auction = await _dbContext.Auctions
+                .AsNoTracking()
+                .Where(a => a.Id == deposit.AuctionId)
+                .Select(a => new { a.SellerId })
+                .FirstOrDefaultAsync(cancellationToken);
+
+            var transfers = BuildCaptureTransfers(deposit, purpose, auction?.SellerId);
+            await _wallet.CaptureDepositHoldAsync(
+                deposit.GatewayReference,
+                new CaptureDepositHoldCommand(purpose, deposit.Amount, transfers),
+                $"capture:{deposit.Id}",
+                cancellationToken);
+
+            deposit.Status = DepositStatus.Captured;
+            deposit.CapturePurpose = purpose;
+            deposit.CapturedAt = now;
+            deposit.PendingAction = DepositPendingAction.None;
+            deposit.NextRetryAt = null;
+            deposit.LastError = null;
+            deposit.NeedsAttention = false;
+            deposit.UpdatedAt = now;
+            deposit.RowVersion += 1;
+            await _dbContext.SaveChangesAsync(cancellationToken);
         }
+        catch (DomainException ex)
+        {
+            _logger.LogWarning(
+                "Capture of hold {HoldId} for deposit {DepositId} failed ({ErrorCode}). It stays pending and will be retried.",
+                deposit.GatewayReference, deposit.Id, ex.ErrorCode);
+            RecordDepositActionFailure(deposit, ex.Message, _clock.GetUtcNow());
+            try
+            {
+                await _dbContext.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException)
+            {
+            }
+        }
+    }
+
+    private async Task ProcessSingleDepositRefundAsync(AuctionDeposit deposit, CancellationToken cancellationToken)
+    {
+        var now = _clock.GetUtcNow();
+        try
+        {
+            if (string.IsNullOrWhiteSpace(deposit.GatewayReference))
+            {
+                var snapshot = await _wallet.GetDepositHoldByReferenceAsync(deposit.Id, cancellationToken);
+                if (snapshot is null)
+                {
+                    RecordDepositActionFailure(deposit, "Hold reference was not found in Wallet for refund.", now);
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                    return;
+                }
+                deposit.GatewayReference = snapshot.HoldId;
+            }
+
+            await _wallet.RefundCapturedHoldAsync(
+                deposit.GatewayReference,
+                deposit.Amount,
+                deposit.ReleaseReason ?? "SELLER_REJECTED",
+                $"refund:{deposit.Id}",
+                cancellationToken);
+
+            deposit.Status = DepositStatus.Released;
+            deposit.ReleasedAt = now;
+            deposit.PendingAction = DepositPendingAction.None;
+            deposit.ReleasePending = false;
+            deposit.NextRetryAt = null;
+            deposit.LastError = null;
+            deposit.NeedsAttention = false;
+            deposit.UpdatedAt = now;
+            deposit.RowVersion += 1;
+            await _dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DomainException ex)
+        {
+            _logger.LogWarning(
+                "Refund of captured hold {HoldId} for deposit {DepositId} failed ({ErrorCode}). It stays pending and will be retried.",
+                deposit.GatewayReference, deposit.Id, ex.ErrorCode);
+            RecordDepositActionFailure(deposit, ex.Message, _clock.GetUtcNow());
+            try
+            {
+                await _dbContext.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException)
+            {
+            }
+        }
+    }
+
+    private async Task ReconcilePendingDepositAsync(AuctionDeposit deposit, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        DepositHoldSnapshot? snapshot;
+        try
+        {
+            snapshot = await _wallet.GetDepositHoldByReferenceAsync(deposit.Id, cancellationToken);
+        }
+        catch (DomainException ex) when (ex.StatusCode >= 500)
+        {
+            _logger.LogWarning(
+                "Reconciling pending deposit {DepositId} with Wallet failed ({ErrorCode}). Will retry next cycle.",
+                deposit.Id, ex.ErrorCode);
+            return;
+        }
+
+        if (snapshot is not null && snapshot.Status == DepositHoldState.Authorized)
+        {
+            var auctionState = await _dbContext.AuctionStates
+                .AsNoTracking()
+                .Where(s => s.AuctionId == deposit.AuctionId && !s.IsDeleted)
+                .Select(s => new { s.Status, s.ScheduledEndAt })
+                .FirstOrDefaultAsync(cancellationToken);
+            var auctionOpen = auctionState is not null &&
+                              DepositRules.IsOpenForDeposit(auctionState.Status, auctionState.ScheduledEndAt, now);
+
+            deposit.GatewayReference = snapshot.HoldId;
+            deposit.AuthorizedAt = snapshot.AuthorizedAt ?? now;
+            deposit.ExpiresAt = null;
+            deposit.FailureCode = null;
+
+            if (!auctionOpen)
+            {
+                deposit.Status = DepositStatus.Released;
+                deposit.ReleasePending = true;
+                deposit.PendingAction = DepositPendingAction.Release;
+                deposit.ReleaseReason = "LATE_AUTHORIZATION";
+                deposit.NextRetryAt = now;
+                deposit.UpdatedAt = now;
+                deposit.RowVersion += 1;
+                await _dbContext.SaveChangesAsync(cancellationToken);
+                await TryReleaseAsync(deposit, cancellationToken);
+                return;
+            }
+
+            deposit.Status = DepositStatus.Authorized;
+            deposit.UpdatedAt = now;
+            deposit.RowVersion += 1;
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            return;
+        }
+
+        if (now - deposit.UpdatedAt >= TimeSpan.FromMinutes(10))
+        {
+            deposit.Status = DepositStatus.Failed;
+            deposit.FailureCode = "HOLD_CREATION_TIMEOUT";
+            deposit.UpdatedAt = now;
+            deposit.RowVersion += 1;
+            await _dbContext.SaveChangesAsync(cancellationToken);
+        }
+    }
+
+    private static IReadOnlyList<HoldTransferInstruction> BuildCaptureTransfers(
+        AuctionDeposit deposit, string purpose, Guid? sellerId)
+    {
+        if (string.Equals(purpose, "Forfeit", StringComparison.OrdinalIgnoreCase) && sellerId.HasValue)
+        {
+            var sellerShare = Math.Floor(deposit.Amount * 0.70m);
+            var platformShare = deposit.Amount - sellerShare;
+            var list = new List<HoldTransferInstruction>();
+            if (sellerShare > 0m)
+                list.Add(new HoldTransferInstruction("USER_WALLET", sellerId.Value, sellerShare, "Forfeited auction deposit share for seller"));
+            if (platformShare > 0m)
+                list.Add(new HoldTransferInstruction("PLATFORM_REVENUE", null, platformShare, "Forfeited auction deposit share for platform"));
+            return list;
+        }
+
+        return new[]
+        {
+            new HoldTransferInstruction(
+                "ESCROW",
+                sellerId,
+                deposit.Amount,
+                $"Auction deposit applied to order payment for auction {deposit.AuctionId}")
+        };
+    }
+
+    private static void RecordDepositActionFailure(AuctionDeposit deposit, string error, DateTimeOffset now)
+    {
+        deposit.AttemptCount += 1;
+        deposit.LastError = error.Length > 500 ? error[..500] : error;
+        if (deposit.AttemptCount > 10)
+        {
+            deposit.NeedsAttention = true;
+            deposit.NextRetryAt = null;
+        }
+        else
+        {
+            var backoffMinutes = deposit.AttemptCount switch
+            {
+                <= 1 => 1,
+                2 => 2,
+                3 => 5,
+                4 => 10,
+                _ => 30
+            };
+            deposit.NextRetryAt = now.AddMinutes(backoffMinutes);
+        }
+        deposit.UpdatedAt = now;
+        deposit.RowVersion += 1;
     }
 
     private static void ValidateCreateRequest(CreateDepositRequest request)

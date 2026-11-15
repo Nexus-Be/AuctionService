@@ -191,12 +191,29 @@ public sealed class CommerceSyncWorker : BackgroundService
                 var commerce = scope.ServiceProvider.GetRequiredService<ICommerceClient>();
                 var orderId = await commerce.SendSettlementAsync(payload, cancellationToken);
 
+                var now = DateTimeOffset.UtcNow;
+                var changed = false;
                 if (orderId is { } createdOrderId)
                 {
                     settlement.OrderId = createdOrderId;
-                    settlement.UpdatedAt = DateTimeOffset.UtcNow;
-                    await db.SaveChangesAsync(cancellationToken);
+                    settlement.UpdatedAt = now;
+                    changed = true;
                 }
+
+                var offer = await db.AuctionWinnerOffers
+                    .FirstOrDefaultAsync(o => o.AuctionId == auction.Id && !o.IsDeleted && o.SettlementState == BackgroundSyncState.Pending, cancellationToken);
+                if (offer is not null)
+                {
+                    offer.SettlementState = BackgroundSyncState.Done;
+                    offer.LastError = null;
+                    offer.NextRetryAt = null;
+                    offer.NeedsAttention = false;
+                    offer.UpdatedAt = now;
+                    changed = true;
+                }
+
+                if (changed)
+                    await db.SaveChangesAsync(cancellationToken);
 
                 _logger.LogInformation(
                     "The settlement of auction {AuctionId} was pushed to Commerce (order {OrderId}).", item.AuctionId, orderId);
