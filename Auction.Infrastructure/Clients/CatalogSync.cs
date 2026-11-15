@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Auction.Application.Interfaces;
+using Auction.Domain.Enums;
 using Auction.Domain.Exceptions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -135,9 +136,9 @@ public sealed class CatalogSyncWorker : BackgroundService
             {
                 using var scope = _scopes.CreateScope();
 
+                var db = scope.ServiceProvider.GetRequiredService<IAuctionDbContext>();
                 if (item.Action is CatalogSyncAction.UnlockProduct or CatalogSyncAction.RevertAuctioned)
                 {
-                    var db = scope.ServiceProvider.GetRequiredService<IAuctionDbContext>();
                     var heldByAnotherAuction = await db.ProductOpenAuctions
                         .AsNoTracking()
                         .AnyAsync(p => p.ProductId == item.ProductId, cancellationToken);
@@ -162,6 +163,24 @@ public sealed class CatalogSyncWorker : BackgroundService
                     case CatalogSyncAction.RevertAuctioned:
                         await catalog.RevertProductAuctionedAsync(item.ProductId, cancellationToken);
                         break;
+                }
+
+                if (item.Action is CatalogSyncAction.UnlockProduct or CatalogSyncAction.RevertAuctioned)
+                {
+                    var auction = await db.Auctions
+                        .FirstOrDefaultAsync(a => a.Id == item.AuctionId && !a.IsDeleted, cancellationToken);
+                    if (auction is not null && auction.StockReleaseState == BackgroundSyncState.Pending)
+                    {
+                        auction.StockReleaseState = BackgroundSyncState.Done;
+                        if (auction.ViolationState != BackgroundSyncState.Pending && auction.StreakResetState != BackgroundSyncState.Pending)
+                        {
+                            auction.LastError = null;
+                            auction.NextRetryAt = null;
+                            auction.NeedsAttention = false;
+                        }
+                        auction.UpdatedAt = DateTimeOffset.UtcNow;
+                        await db.SaveChangesAsync(cancellationToken);
+                    }
                 }
 
                 _logger.LogInformation(

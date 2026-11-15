@@ -36,6 +36,20 @@ public class AuctionDeposit : BaseEntity<Guid>
     public string? ReleaseReason { get; set; }
     public DateTimeOffset? ReleasedAt { get; set; }
 
+    /// <summary>Mục đích thu cọc khi đã Captured: OrderPayment hoặc Forfeit.</summary>
+    public string? CapturePurpose { get; set; }
+    public DateTimeOffset? CapturedAt { get; set; }
+
+    /// <summary>Việc nền đang chờ thực hiện trên cọc (None, Release, Capture, Refund).</summary>
+    public DepositPendingAction PendingAction { get; set; } = DepositPendingAction.None;
+
+    /// <summary>Mục đích khi PendingAction = Capture (OrderPayment hoặc Forfeit).</summary>
+    public string? PendingPurpose { get; set; }
+    public DateTimeOffset? NextRetryAt { get; set; }
+    public string? LastError { get; set; }
+    public bool NeedsAttention { get; set; }
+    public string? LastGatewayEventId { get; set; }
+
     /// <summary>Tăng mỗi lần cập nhật để hai callback song song không ghi đè nhau.</summary>
     public long RowVersion { get; set; }
 

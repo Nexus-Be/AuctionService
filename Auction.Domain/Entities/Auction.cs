@@ -1,4 +1,5 @@
 using Auction.Domain.Base;
+using Auction.Domain.Enums;
 
 namespace Auction.Domain.Entities;
 
@@ -17,6 +18,15 @@ public class Auction : AuditableEntity<Guid>
     public int MinReputationToSell { get; set; }
     public int AntiSnipingExtensionMinutes { get; set; }
     public int MaxExtensionCount { get; set; }
+
+    // Background sync states (Overview 4.1)
+    public BackgroundSyncState ViolationState { get; set; } = BackgroundSyncState.None;
+    public BackgroundSyncState StreakResetState { get; set; } = BackgroundSyncState.None;
+    public BackgroundSyncState StockReleaseState { get; set; } = BackgroundSyncState.None;
+    public int AttemptCount { get; set; }
+    public DateTimeOffset? NextRetryAt { get; set; }
+    public string? LastError { get; set; }
+    public bool NeedsAttention { get; set; }
 
     // Navigation
     public Auction? RecreatedFromAuction { get; set; }

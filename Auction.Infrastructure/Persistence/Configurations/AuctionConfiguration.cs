@@ -12,6 +12,7 @@ public class AuctionConfiguration : IEntityTypeConfiguration<Auction>
         builder.Property(x => x.SnapshotProductTitle).HasMaxLength(500);
         builder.Property(x => x.StartPriceAmount).HasPrecision(18, 2);
         builder.Property(x => x.BidStepAmount).HasPrecision(18, 2);
+        builder.Property(x => x.LastError).HasMaxLength(500);
 
         builder.HasOne(a => a.RecreatedFromAuction)
             .WithMany(a => a.RecreatedAuctions)

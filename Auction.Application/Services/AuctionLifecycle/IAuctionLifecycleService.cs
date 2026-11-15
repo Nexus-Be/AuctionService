@@ -33,4 +33,9 @@ public interface IAuctionLifecycleService
     /// Trả false nếu lời mời không còn đủ điều kiện (đã được phản hồi, chưa tới hạn) hoặc bị xử lý đồng thời bởi nơi khác.
     /// </summary>
     Task<bool> ExpireWinnerOfferAsync(Guid offerId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Quét định kỳ (Overview 4.1): thực hiện lại các việc nền còn Pending (Deposit Release/Capture/Refund, User Violation/StreakReset, Catalog StockRelease, Commerce Offer Settlement).
+    /// </summary>
+    Task ProcessDueBackgroundTasksAsync(int limit, CancellationToken cancellationToken = default);
 }

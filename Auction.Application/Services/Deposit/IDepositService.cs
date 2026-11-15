@@ -37,4 +37,7 @@ public interface IDepositService
 
     /// <summary>Giải phóng các cọc đã đánh dấu ReleasePending của một phiên đấu giá (chạy sau khi commit huỷ phiên hoặc kết thúc phiên).</summary>
     Task ReleasePendingDepositsForAuctionAsync(Guid auctionId, CancellationToken cancellationToken = default);
+
+    /// <summary>Quét và thực hiện lại các thao tác cọc đang chờ ở nền (Release, Capture, Refund hoặc đồng bộ cọc Pending bị timeout).</summary>
+    Task ProcessDueDepositRetriesAsync(int limit, CancellationToken cancellationToken = default);
 }

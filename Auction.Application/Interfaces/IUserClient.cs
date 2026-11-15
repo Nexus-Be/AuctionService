@@ -35,6 +35,13 @@ public interface IUserClient
     /// </summary>
     Task<RecordAuctionViolationResult> RecordAuctionViolationAsync(
         RecordAuctionViolationCommand command, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reports a timely auction order payment to the User service to reset ViolationStreak to 0 (API 25: POST /api/v1/internal/users/{userId}/auction-payments).
+    /// Idempotent on (UserId, AuctionId). Evicts the cached deposit profile for the user.
+    /// </summary>
+    Task<RecordAuctionPaymentResult> RecordAuctionPaymentAsync(
+        RecordAuctionPaymentCommand command, CancellationToken cancellationToken = default);
 }
 
 /// <summary>FailureReason is the code sent by User (for example ERR_REPUTATION_TOO_LOW). Null when allowed.</summary>
@@ -83,3 +90,18 @@ public sealed record RecordAuctionViolationResult(
     int ReputationAfter,
     string? SanctionType,
     DateTimeOffset? SanctionUntil);
+
+/// <summary>Source is "WINNER" or "SECOND_CHANCE".</summary>
+public sealed record RecordAuctionPaymentCommand(
+    Guid UserId,
+    Guid AuctionId,
+    Guid OrderId,
+    string Source,
+    DateTimeOffset PaidAt);
+
+public sealed record RecordAuctionPaymentResult(
+    bool Recorded,
+    bool Created,
+    int PreviousStreak,
+    int NewStreak,
+    bool RestrictionLifted);

@@ -23,6 +23,7 @@ public sealed class UserClient : IUserClient
     private const string BatchInfoPath = "/api/v1/internal/users/batch-public-info";
     private const string DepositProfilePathFormat = "/api/v1/internal/users/{0}/auction-deposit-profile";
     private const string RecordViolationPathFormat = "/api/v1/internal/users/{0}/auction-violations";
+    private const string RecordPaymentPathFormat = "/api/v1/internal/users/{0}/auction-payments";
     private const int BatchLimit = 100;
 
     // The deposit profile is read on every bid, so it is cached briefly. A newly restricted bidder can still bid for up to this long.
@@ -223,6 +224,64 @@ public sealed class UserClient : IUserClient
         }
     }
 
+    public async Task<RecordAuctionPaymentResult> RecordAuctionPaymentAsync(
+        RecordAuctionPaymentCommand command, CancellationToken cancellationToken = default)
+    {
+        var cacheKey = $"user-deposit-profile:{command.UserId:N}";
+        _cache.Remove(cacheKey);
+
+        if (_options.BypassUserCheck)
+        {
+            _logger.LogWarning("BypassUserCheck is on: recording auction payment was skipped for user {UserId}.", command.UserId);
+            return new RecordAuctionPaymentResult(true, true, 0, 0, false);
+        }
+
+        var path = string.Format(RecordPaymentPathFormat, command.UserId);
+        var body = new RecordPaymentBody(
+            command.AuctionId,
+            command.OrderId,
+            command.Source,
+            command.PaidAt);
+
+        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutSource.CancelAfter(_defaultTimeout);
+
+        try
+        {
+            using var content = new StringContent(
+                JsonSerializer.Serialize(body, JsonOptions), Encoding.UTF8, "application/json");
+            using var response = await _http.PostAsync(path, content, timeoutSource.Token);
+
+            if (response.StatusCode == HttpStatusCode.NotFound)
+                throw new DomainException("USER_NOT_FOUND", "The user was not found.", 404);
+
+            if (!response.IsSuccessStatusCode)
+                throw new HttpRequestException($"User service answered {(int)response.StatusCode} to auction-payments.");
+
+            var text = await response.Content.ReadAsStringAsync(timeoutSource.Token);
+            using var document = JsonDocument.Parse(text);
+            var root = document.RootElement;
+            var payload = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("data", out var data) &&
+                          data.ValueKind == JsonValueKind.Object
+                ? data
+                : root;
+
+            var recorded = !HasProperty(payload, "recorded") || RequireBool(payload, "recorded");
+            var created = HasProperty(payload, "created") && RequireBool(payload, "created");
+            var previousStreak = OptionalInt(payload, "previousStreak") ?? 0;
+            var newStreak = OptionalInt(payload, "newStreak") ?? 0;
+            var restrictionLifted = HasProperty(payload, "restrictionLifted") && RequireBool(payload, "restrictionLifted");
+
+            return new RecordAuctionPaymentResult(recorded, created, previousStreak, newStreak, restrictionLifted);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or NotSupportedException
+                                   || (ex is OperationCanceledException && !cancellationToken.IsCancellationRequested))
+        {
+            _logger.LogWarning(ex, "User service call failed when recording auction payment for user {UserId}.", command.UserId);
+            throw new DomainException("USER_SERVICE_UNAVAILABLE", "The user service is unavailable.", 503);
+        }
+    }
+
     // ------------------------------------------------------------------ HTTP
 
     /// <summary>Posts a body and returns the useful part of the answer (the "data" object when there is one).</summary>
@@ -404,4 +463,10 @@ public sealed class UserClient : IUserClient
         Guid OrderId,
         DateTimeOffset OccurredAt,
         decimal DepositForfeitedAmount);
+
+    private sealed record RecordPaymentBody(
+        Guid AuctionId,
+        Guid OrderId,
+        string Source,
+        DateTimeOffset PaidAt);
 }

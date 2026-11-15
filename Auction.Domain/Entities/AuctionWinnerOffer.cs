@@ -16,6 +16,13 @@ public class AuctionWinnerOffer : BaseEntity<Guid>
     public DateTimeOffset? RespondedAt { get; set; }
     public string? ResponseReason { get; set; }
 
+    // Background sync state for pushing second-chance settlement to Commerce (Overview 4.1)
+    public BackgroundSyncState SettlementState { get; set; } = BackgroundSyncState.None;
+    public int AttemptCount { get; set; }
+    public DateTimeOffset? NextRetryAt { get; set; }
+    public string? LastError { get; set; }
+    public bool NeedsAttention { get; set; }
+
     public Auction? Auction { get; set; }
     public Bid? Bid { get; set; }
 }
