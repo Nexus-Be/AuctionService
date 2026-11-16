@@ -74,16 +74,12 @@ public sealed class GlobalExceptionHandlerMiddleware
         context.Response.ContentType = "application/problem+json";
         context.Response.StatusCode = statusCode;
 
-        var problemDetails = new
-        {
-            type = GetRfcType(statusCode),
-            title,
-            status = statusCode,
-            errorCode,
-            detail,
-            traceId,
-            timestamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
-        };
+        var timestamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+        // "details" is only written when the exception carries it, so other error bodies keep their shape.
+        object problemDetails = exception is DomainException { Details: { } details }
+            ? new { type = GetRfcType(statusCode), title, status = statusCode, errorCode, detail, details, traceId, timestamp }
+            : new { type = GetRfcType(statusCode), title, status = statusCode, errorCode, detail, traceId, timestamp };
 
         await context.Response.WriteAsync(JsonSerializer.Serialize(problemDetails));
     }

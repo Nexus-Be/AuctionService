@@ -43,6 +43,12 @@ public sealed record BidOutbidWorkItem(BidOutbidNotification Notification) : Not
 
 public sealed record AuctionWinnerWorkItem(AuctionWinnerNotification Notification) : NotificationWorkItem;
 
+public sealed record AuctionFailedWorkItem(AuctionFailedNotification Notification) : NotificationWorkItem;
+
+public sealed record AuctionCancelledWorkItem(AuctionCancelledNotification Notification) : NotificationWorkItem;
+
+public sealed record ReplacementWinnerOfferWorkItem(ReplacementWinnerOfferNotification Notification) : NotificationWorkItem;
+
 /// <summary>
 /// Hàng đợi trong bộ nhớ cho thông báo gửi sang Notification service. Hàm Notify* trả về ngay và không bao giờ ném lỗi.
 /// Tắt (Notification:Enabled=false) thì bỏ qua thông báo. Hàng đợi đầy thì bỏ thông báo mới và ghi log.
@@ -71,6 +77,15 @@ public sealed class NotificationClient : INotificationClient
 
     public void NotifyAuctionWinner(AuctionWinnerNotification notification) =>
         Enqueue(new AuctionWinnerWorkItem(notification), "auction winner", notification.AuctionId);
+
+    public void NotifyAuctionFailed(AuctionFailedNotification notification) =>
+        Enqueue(new AuctionFailedWorkItem(notification), "auction failed", notification.AuctionId);
+
+    public void NotifyAuctionCancelled(AuctionCancelledNotification notification) =>
+        Enqueue(new AuctionCancelledWorkItem(notification), "auction cancelled", notification.AuctionId);
+
+    public void NotifyReplacementWinnerOffer(ReplacementWinnerOfferNotification notification) =>
+        Enqueue(new ReplacementWinnerOfferWorkItem(notification), "replacement winner offer", notification.AuctionId);
 
     private void Enqueue(NotificationWorkItem item, string kind, Guid auctionId)
     {

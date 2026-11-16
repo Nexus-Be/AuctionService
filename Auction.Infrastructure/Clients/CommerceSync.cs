@@ -184,19 +184,48 @@ public sealed class CommerceSyncWorker : BackgroundService
                     ? "Auction product"
                     : title.Length > MaxProductNameLength ? title[..MaxProductNameLength] : title;
 
+                var isSecondChance = await db.AuctionWinnerOffers
+                    .AsNoTracking()
+                    .AnyAsync(o => o.AuctionId == auction.Id && o.BidderId == winnerId && o.Status == AuctionWinnerOfferStatus.Accepted && !o.IsDeleted, cancellationToken);
+                var source = isSecondChance ? "SECOND_CHANCE" : "WINNER";
+
+                var depositAmount = await db.AuctionDeposits
+                    .AsNoTracking()
+                    .Where(d => d.AuctionId == auction.Id && d.BidderId == winnerId && !d.IsDeleted &&
+                                (d.Status == DepositStatus.Authorized || d.Status == DepositStatus.Captured))
+                    .Select(d => (decimal?)d.Amount)
+                    .FirstOrDefaultAsync(cancellationToken) ?? 0m;
+
                 var payload = new CommerceSettlementPayload(
                     auction.Id, winningBidId, winnerId, auction.SellerId, auction.ProductId, skuId,
-                    productName, imageUrl, winningAmount, paymentDeadline);
+                    productName, imageUrl, winningAmount, paymentDeadline, depositAmount, source);
 
                 var commerce = scope.ServiceProvider.GetRequiredService<ICommerceClient>();
                 var orderId = await commerce.SendSettlementAsync(payload, cancellationToken);
 
+                var now = DateTimeOffset.UtcNow;
+                var changed = false;
                 if (orderId is { } createdOrderId)
                 {
                     settlement.OrderId = createdOrderId;
-                    settlement.UpdatedAt = DateTimeOffset.UtcNow;
-                    await db.SaveChangesAsync(cancellationToken);
+                    settlement.UpdatedAt = now;
+                    changed = true;
                 }
+
+                var offer = await db.AuctionWinnerOffers
+                    .FirstOrDefaultAsync(o => o.AuctionId == auction.Id && !o.IsDeleted && o.SettlementState == BackgroundSyncState.Pending, cancellationToken);
+                if (offer is not null)
+                {
+                    offer.SettlementState = BackgroundSyncState.Done;
+                    offer.LastError = null;
+                    offer.NextRetryAt = null;
+                    offer.NeedsAttention = false;
+                    offer.UpdatedAt = now;
+                    changed = true;
+                }
+
+                if (changed)
+                    await db.SaveChangesAsync(cancellationToken);
 
                 _logger.LogInformation(
                     "The settlement of auction {AuctionId} was pushed to Commerce (order {OrderId}).", item.AuctionId, orderId);

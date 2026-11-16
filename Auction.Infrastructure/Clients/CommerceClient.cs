@@ -39,10 +39,11 @@ public sealed class CommerceClient : ICommerceClient
             var code = ReadErrorCode(text);
 
             // Commerce đã có đơn còn hiệu lực của người thắng khác cho phiên này: không còn gì để gửi.
-            if (status == 409 && code == "AUCTION_ALREADY_SETTLED")
+            if (status == 409 && (code == "SETTLEMENT_CONFLICT" || code == "AUCTION_ALREADY_SETTLED"))
             {
                 _logger.LogWarning(
-                    "Commerce already has an active order for auction {AuctionId}; the settlement was not created again.", payload.AuctionId);
+                    "Commerce already has an active order for auction {AuctionId} ({Code}); the settlement was not created again.",
+                    payload.AuctionId, code);
                 return null;
             }
 
@@ -90,11 +91,23 @@ public sealed class CommerceClient : ICommerceClient
         try
         {
             using var document = JsonDocument.Parse(text);
-            return document.RootElement.ValueKind == JsonValueKind.Object
-                && document.RootElement.TryGetProperty("errorCode", out var code)
-                && code.ValueKind == JsonValueKind.String
-                    ? code.GetString()
-                    : null;
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return null;
+
+            if (root.TryGetProperty("errorCode", out var errorCode) && errorCode.ValueKind == JsonValueKind.String)
+                return errorCode.GetString();
+            if (root.TryGetProperty("code", out var code) && code.ValueKind == JsonValueKind.String)
+                return code.GetString();
+            if (root.TryGetProperty("error", out var errObj) && errObj.ValueKind == JsonValueKind.Object)
+            {
+                if (errObj.TryGetProperty("code", out var nestedCode) && nestedCode.ValueKind == JsonValueKind.String)
+                    return nestedCode.GetString();
+                if (errObj.TryGetProperty("errorCode", out var nestedErrorCode) && nestedErrorCode.ValueKind == JsonValueKind.String)
+                    return nestedErrorCode.GetString();
+            }
+
+            return null;
         }
         catch (JsonException)
         {

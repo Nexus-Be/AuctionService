@@ -23,6 +23,8 @@ public class AppDbContext : DbContext, IAuctionDbContext
     public DbSet<AuctionStatusHistory> AuctionStatusHistories => Set<AuctionStatusHistory>();
     public DbSet<AuctionConfig> AuctionConfigs => Set<AuctionConfig>();
     public DbSet<IdempotencyKey> IdempotencyKeys => Set<IdempotencyKey>();
+    public DbSet<AuctionDeposit> AuctionDeposits => Set<AuctionDeposit>();
+    public DbSet<DepositCallbackEvent> DepositCallbackEvents => Set<DepositCallbackEvent>();
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)

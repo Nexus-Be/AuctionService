@@ -9,8 +9,10 @@ using Microsoft.EntityFrameworkCore;
 using global::Auction.Application.Common.Extensions;
 using global::Auction.Application.Interfaces;
 using global::Auction.Application.Services.Auction;
+using global::Auction.Application.Services.Deposit;
 using global::Auction.Domain.Entities;
 using global::Auction.Domain.Enums;
+using global::Auction.Domain.Exceptions;
 
 public sealed class AuctionLifecycleService : IAuctionLifecycleService
 {
@@ -22,19 +24,25 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
     private readonly IAuctionNotifier _notifier;
     private readonly INotificationClient _notifications;
     private readonly ICatalogSync _catalogSync;
+    private readonly ICatalogClient _catalog;
     private readonly ICommerceSync _commerceSync;
+    private readonly IUserClient _users;
+    private readonly IDepositService _deposits;
 
-    /// <summary>Khởi tạo service với DbContext, đồng hồ hệ thống và bộ thông báo realtime.</summary>
+    /// <summary>Khởi tạo service với DbContext, đồng hồ hệ thống, bộ thông báo realtime và service cọc.</summary>
     public AuctionLifecycleService(
         IAuctionDbContext dbContext, TimeProvider clock, IAuctionNotifier notifier, INotificationClient notifications,
-        ICatalogSync catalogSync, ICommerceSync commerceSync)
+        ICatalogSync catalogSync, ICatalogClient catalog, ICommerceSync commerceSync, IUserClient users, IDepositService deposits)
     {
         _dbContext = dbContext;
         _clock = clock;
         _notifier = notifier;
         _notifications = notifications;
         _catalogSync = catalogSync;
+        _catalog = catalog;
         _commerceSync = commerceSync;
+        _users = users;
+        _deposits = deposits;
     }
 
     /// <summary>Tìm các phiên Scheduled đã tới giờ bắt đầu. Chỉ đọc mã phiên, việc chuyển trạng thái làm riêng từng phiên.</summary>
@@ -147,13 +155,22 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             return false;
         }
 
-        var winningBid = await _dbContext.BidHistories
+        var validBids = await _dbContext.BidHistories
             .AsNoTracking()
             .Where(h => h.AuctionId == auctionId && !h.IsInvalidated && !h.IsDeleted)
             .OrderByDescending(h => h.Amount)
             .ThenBy(h => h.SequenceNo)
             .Select(h => new { h.BidId, h.BidderId, h.Amount })
-            .FirstOrDefaultAsync(cancellationToken);
+            .ToListAsync(cancellationToken);
+
+        var topBidders = validBids
+            .GroupBy(b => b.BidderId)
+            .Select(g => g.First())
+            .Take(2)
+            .ToList();
+
+        var winningBid = topBidders.FirstOrDefault();
+        var runnerUpBidderId = topBidders.Count > 1 ? topBidders[1].BidderId : (Guid?)null;
 
         state.EndedAt = now;
         state.UpdatedAt = now;
@@ -169,6 +186,9 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             toStatus = AuctionStatus.Failed;
             reason = "Auction ended without a valid bid.";
             state.Status = toStatus;
+            auction.StockReleaseState = BackgroundSyncState.Pending;
+            auction.NextRetryAt = now;
+            auction.NeedsAttention = false;
             newValues = new { status = toStatus.ToString(), endedAt = now };
 
             // Nhả sản phẩm để seller tạo lại phiên. Index unique theo ProductId bỏ qua xoá mềm nên phải xoá thật dòng này.
@@ -258,8 +278,40 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             oldValues: new { status = AuctionStatus.Running.ToString() },
             newValues: newValues);
 
+        // Quy tắc giữ cọc Top 2: Giữ nguyên cọc của Winner (hạng 1) và Người về nhì tiềm năng (hạng 2);
+        // chỉ mở khoá cọc từ hạng 3 trở xuống (hoặc mở khoá toàn bộ nếu phiên không có bid hợp lệ).
+        var depositsToRelease = await _dbContext.AuctionDeposits
+            .Where(d => d.AuctionId == auctionId && !d.IsDeleted &&
+                        (d.Status == DepositStatus.Authorized || d.Status == DepositStatus.Pending) &&
+                        (winningBid == null ||
+                         (d.BidderId != winningBid.BidderId && (runnerUpBidderId == null || d.BidderId != runnerUpBidderId.Value))))
+            .ToListAsync(cancellationToken);
+
+        var releaseReason = winningBid is null ? "AUCTION_FAILED" : "AUCTION_ENDED_NOT_WINNER";
+        foreach (var deposit in depositsToRelease)
+        {
+            var oldStatus = deposit.Status;
+            deposit.Status = DepositStatus.Released;
+            deposit.ReleaseReason = releaseReason;
+            // Always set ReleasePending = true and PendingAction = Release: a Pending deposit without GatewayReference may still have locked funds at Wallet if W1 timed out.
+            deposit.ReleasePending = true;
+            deposit.PendingAction = DepositPendingAction.Release;
+            deposit.NextRetryAt = now;
+            deposit.NeedsAttention = false;
+            deposit.UpdatedAt = now;
+            deposit.RowVersion += 1;
+
+            _dbContext.AddAuditLog(
+                AuditAction.DepositRelease, "AuctionDeposit", deposit.Id.ToString(),
+                oldValues: new { status = oldStatus },
+                newValues: new { depositId = deposit.Id, status = deposit.Status, releaseReason, releasePending = deposit.ReleasePending });
+        }
+
         if (!await TrySaveAsync(cancellationToken))
             return false;
+
+        if (depositsToRelease.Count > 0)
+            await _deposits.ReleasePendingDepositsForAuctionAsync(auctionId, cancellationToken);
 
         await _notifier.AuctionStatusChangedAsync(
             auctionId, new AuctionStatusChangedMessage(auctionId, toStatus.ToString(), now), CancellationToken.None);
@@ -276,6 +328,9 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
         else
         {
             _catalogSync.UnlockProduct(auction.ProductId, auctionId);
+            _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+                auctionId, auction.SellerId, auction.SnapshotProductTitle,
+                "Auction ended without a valid bid.", now, null));
         }
 
         return true;
@@ -324,11 +379,39 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
         offer.UpdatedAt = now;
 
         var failAuction = state is not null && state.Status == AuctionStatus.Ended;
+        var depositsToReleaseCount = 0;
         if (failAuction)
         {
             state!.Status = AuctionStatus.Failed;
             state.UpdatedAt = now;
             state.RowVersion += 1;
+            auction!.StockReleaseState = BackgroundSyncState.Pending;
+            auction.NextRetryAt = now;
+            auction.NeedsAttention = false;
+
+            // Lời mời quá hạn mà chưa nhận: không tính là bỏ kèo, mở khoá toàn bộ cọc còn đang giữ của phiên (cọc của người về nhì).
+            var remainingDeposits = await _dbContext.AuctionDeposits
+                .Where(d => d.AuctionId == offer.AuctionId && !d.IsDeleted &&
+                            (d.Status == DepositStatus.Authorized || d.Status == DepositStatus.Pending))
+                .ToListAsync(cancellationToken);
+            foreach (var deposit in remainingDeposits)
+            {
+                var oldDepositStatus = deposit.Status;
+                deposit.Status = DepositStatus.Released;
+                deposit.ReleaseReason = "SECOND_CHANCE_EXPIRED";
+                deposit.ReleasePending = true;
+                deposit.PendingAction = DepositPendingAction.Release;
+                deposit.NextRetryAt = now;
+                deposit.NeedsAttention = false;
+                deposit.UpdatedAt = now;
+                deposit.RowVersion += 1;
+
+                _dbContext.AddAuditLog(
+                    AuditAction.DepositRelease, "AuctionDeposit", deposit.Id.ToString(),
+                    oldValues: new { status = oldDepositStatus },
+                    newValues: new { depositId = deposit.Id, status = deposit.Status, releaseReason = deposit.ReleaseReason, releasePending = deposit.ReleasePending });
+            }
+            depositsToReleaseCount = remainingDeposits.Count;
 
             // Nhả sản phẩm để seller tạo lại phiên. Index unique theo ProductId bỏ qua xoá mềm nên phải xoá thật dòng này.
             var openAuction = await _dbContext.ProductOpenAuctions
@@ -364,8 +447,14 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
 
         if (failAuction)
         {
+            if (depositsToReleaseCount > 0)
+                await _deposits.ReleasePendingDepositsForAuctionAsync(offer.AuctionId, cancellationToken);
+
             // Đã lưu: mở khoá sản phẩm ở Catalog (gửi nền, có thử lại), rồi báo realtime phiên đã Failed.
             _catalogSync.UnlockProduct(auction!.ProductId, offer.AuctionId);
+            _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+                offer.AuctionId, auction.SellerId, auction.SnapshotProductTitle,
+                "The replacement winner offer expired without an answer.", now, null));
 
             await _notifier.AuctionStatusChangedAsync(
                 offer.AuctionId, new AuctionStatusChangedMessage(offer.AuctionId, AuctionStatus.Failed.ToString(), now), CancellationToken.None);
@@ -373,6 +462,227 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
 
         return true;
     }
+
+    /// <summary>
+    /// Job quét định kỳ (Overview 4.1):
+    /// 1) Gọi _deposits.ProcessDueDepositRetriesAsync để thử lại Release/Capture/Refund cọc và đồng bộ cọc Pending bị timeout.
+    /// 2) Quét các phiên có ViolationState, StreakResetState hoặc StockReleaseState = Pending (NextRetryAt &lt;= now, NeedsAttention = false).
+    /// 3) Quét các lời mời người về nhì có SettlementState = Pending (NextRetryAt &lt;= now, NeedsAttention = false).
+    /// </summary>
+    public async Task ProcessDueBackgroundTasksAsync(int limit, CancellationToken cancellationToken = default)
+    {
+        await _deposits.ProcessDueDepositRetriesAsync(limit, cancellationToken);
+
+        var now = _clock.GetUtcNow();
+
+        var dueAuctions = await _dbContext.Auctions
+            .Include(a => a.AuctionResult)
+            .Include(a => a.AuctionSettlement)
+            .Where(a => !a.IsDeleted
+                        && !a.NeedsAttention
+                        && (a.ViolationState == BackgroundSyncState.Pending
+                            || a.StreakResetState == BackgroundSyncState.Pending
+                            || a.StockReleaseState == BackgroundSyncState.Pending)
+                        && (a.NextRetryAt == null || a.NextRetryAt <= now))
+            .OrderBy(a => a.NextRetryAt)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
+        foreach (var auction in dueAuctions)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await ProcessSingleAuctionBackgroundSyncAsync(auction, now, cancellationToken);
+        }
+
+        var dueOffers = await _dbContext.AuctionWinnerOffers
+            .Where(o => !o.IsDeleted
+                        && !o.NeedsAttention
+                        && o.SettlementState == BackgroundSyncState.Pending
+                        && (o.NextRetryAt == null || o.NextRetryAt <= now))
+            .OrderBy(o => o.NextRetryAt)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
+        foreach (var offer in dueOffers)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await ProcessSingleOfferSettlementSyncAsync(offer, now, cancellationToken);
+        }
+    }
+
+    private async Task ProcessSingleAuctionBackgroundSyncAsync(
+        Auction auction, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        string? firstError = null;
+        var settlement = auction.AuctionSettlement;
+        var result = auction.AuctionResult;
+        var buyerId = settlement?.WinnerId ?? result?.WinnerId;
+        var orderId = settlement?.OrderId ?? Guid.Empty;
+        var isSecondChance = buyerId.HasValue && await _dbContext.AuctionWinnerOffers
+            .AsNoTracking()
+            .AnyAsync(o => o.AuctionId == auction.Id && o.BidderId == buyerId.Value && o.Status == AuctionWinnerOfferStatus.Accepted, cancellationToken);
+
+        if (auction.ViolationState == BackgroundSyncState.Pending)
+        {
+            if (buyerId is null || orderId == Guid.Empty)
+            {
+                auction.ViolationState = BackgroundSyncState.Done;
+            }
+            else
+            {
+                try
+                {
+                    var depAmount = await _dbContext.AuctionDeposits
+                        .AsNoTracking()
+                        .Where(d => d.AuctionId == auction.Id && d.BidderId == buyerId.Value && !d.IsDeleted)
+                        .Select(d => (decimal?)d.Amount)
+                        .FirstOrDefaultAsync(cancellationToken);
+                    var forfeited = depAmount ?? 0m;
+
+                    var violationType = isSecondChance ? "SecondChanceNonPayment" : "WinnerNonPayment";
+                    await _users.RecordAuctionViolationAsync(
+                        new RecordAuctionViolationCommand(
+                            buyerId.Value,
+                            violationType,
+                            auction.Id,
+                            orderId,
+                            settlement?.UpdatedAt ?? now,
+                            forfeited),
+                        cancellationToken);
+                    auction.ViolationState = BackgroundSyncState.Done;
+                }
+                catch (DomainException ex) when (ex.StatusCode == 404)
+                {
+                    auction.ViolationState = BackgroundSyncState.Done;
+                }
+                catch (DomainException ex)
+                {
+                    firstError ??= ex.Message;
+                }
+            }
+        }
+
+        if (auction.StreakResetState == BackgroundSyncState.Pending)
+        {
+            if (buyerId is null || orderId == Guid.Empty)
+            {
+                auction.StreakResetState = BackgroundSyncState.Done;
+            }
+            else
+            {
+                try
+                {
+                    var source = isSecondChance ? "SECOND_CHANCE" : "WINNER";
+                    await _users.RecordAuctionPaymentAsync(
+                        new RecordAuctionPaymentCommand(
+                            buyerId.Value,
+                            auction.Id,
+                            orderId,
+                            source,
+                            settlement?.PaidAt ?? now),
+                        cancellationToken);
+                    auction.StreakResetState = BackgroundSyncState.Done;
+                }
+                catch (DomainException ex) when (ex.StatusCode == 404)
+                {
+                    auction.StreakResetState = BackgroundSyncState.Done;
+                }
+                catch (DomainException ex)
+                {
+                    firstError ??= ex.Message;
+                }
+            }
+        }
+
+        if (auction.StockReleaseState == BackgroundSyncState.Pending)
+        {
+            try
+            {
+                var heldByAnotherAuction = await _dbContext.ProductOpenAuctions
+                    .AsNoTracking()
+                    .AnyAsync(p => p.ProductId == auction.ProductId, cancellationToken);
+                if (!heldByAnotherAuction)
+                    await _catalog.UnlockProductFromAuctionAsync(auction.ProductId, cancellationToken);
+
+                auction.StockReleaseState = BackgroundSyncState.Done;
+            }
+            catch (DomainException ex)
+            {
+                firstError ??= ex.Message;
+            }
+        }
+
+        var stillPending = auction.ViolationState == BackgroundSyncState.Pending
+                           || auction.StreakResetState == BackgroundSyncState.Pending
+                           || auction.StockReleaseState == BackgroundSyncState.Pending;
+        if (!stillPending)
+        {
+            auction.AttemptCount = 0;
+            auction.LastError = null;
+            auction.NextRetryAt = null;
+            auction.NeedsAttention = false;
+        }
+        else if (firstError is not null)
+        {
+            auction.AttemptCount += 1;
+            auction.LastError = firstError.Length > 500 ? firstError[..500] : firstError;
+            if (auction.AttemptCount > 10)
+            {
+                auction.NeedsAttention = true;
+                auction.NextRetryAt = null;
+            }
+            else
+            {
+                auction.NextRetryAt = now.AddMinutes(GetBackoffMinutes(auction.AttemptCount));
+            }
+        }
+
+        auction.UpdatedAt = now;
+        await TrySaveAsync(cancellationToken);
+    }
+
+    private async Task ProcessSingleOfferSettlementSyncAsync(
+        AuctionWinnerOffer offer, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var settlement = await _dbContext.AuctionSettlements
+            .AsNoTracking()
+            .FirstOrDefaultAsync(s => s.AuctionId == offer.AuctionId && !s.IsDeleted, cancellationToken);
+
+        if (settlement is not null && (settlement.OrderId is not null || settlement.Status != AuctionSettlementStatus.PendingPayment))
+        {
+            offer.SettlementState = BackgroundSyncState.Done;
+            offer.AttemptCount = 0;
+            offer.LastError = null;
+            offer.NextRetryAt = null;
+            offer.NeedsAttention = false;
+            offer.UpdatedAt = now;
+            await TrySaveAsync(cancellationToken);
+            return;
+        }
+
+        _commerceSync.PushSettlement(offer.AuctionId);
+        offer.AttemptCount += 1;
+        if (offer.AttemptCount > 10)
+        {
+            offer.NeedsAttention = true;
+            offer.NextRetryAt = null;
+        }
+        else
+        {
+            offer.NextRetryAt = now.AddMinutes(GetBackoffMinutes(offer.AttemptCount));
+        }
+        offer.UpdatedAt = now;
+        await TrySaveAsync(cancellationToken);
+    }
+
+    private static int GetBackoffMinutes(int attempt) => attempt switch
+    {
+        <= 1 => 1,
+        2 => 2,
+        3 => 5,
+        4 => 10,
+        _ => 30
+    };
 
     /// <summary>Lưu thay đổi. Xung đột đồng thời (RowVersion của phiên đã bị đổi) thì trả false thay vì ném lỗi, các lỗi khác vẫn ném ra.</summary>
     private async Task<bool> TrySaveAsync(CancellationToken cancellationToken)

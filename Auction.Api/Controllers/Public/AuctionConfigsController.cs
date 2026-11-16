@@ -65,4 +65,30 @@ public class AuctionConfigsController : ControllerBase
         var result = await _configService.UpdateAsync(actor, request, ct);
         return Ok(result);
     }
+
+    /// <summary>Admin views current deposit policy and version history.</summary>
+    [HttpGet("deposit-policy")]
+    [ProducesResponseType(typeof(DepositPolicyResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetDepositPolicy([FromQuery] int? version, CancellationToken ct = default)
+    {
+        if (!this.TryGetUserId(out _, out var errorResult)) return errorResult;
+        if (!this.EnsureAdmin(out var adminError)) return adminError;
+
+        var result = await _configService.GetDepositPolicyAsync(version, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Admin updates deposit policy, creating a new version. Requires If-Match header with current version.</summary>
+    [HttpPut("deposit-policy")]
+    [ProducesResponseType(typeof(UpdateDepositPolicyResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> UpdateDepositPolicy([FromBody] UpdateDepositPolicyRequest request, CancellationToken ct = default)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.EnsureAdmin(out var adminError)) return adminError;
+
+        var ifMatch = Request.Headers["If-Match"].FirstOrDefault();
+        var actor = new ActorContext(userId, this.GetTraceId(), this.GetClientIp());
+        var result = await _configService.UpdateDepositPolicyAsync(actor, ifMatch, request, ct);
+        return Ok(result);
+    }
 }

@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Auction.Application.Interfaces;
+using Auction.Domain.Enums;
 using Auction.Domain.Exceptions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -15,7 +16,8 @@ using Microsoft.Extensions.Logging;
 public enum CatalogSyncAction
 {
     UnlockProduct,
-    MarkAuctioned
+    MarkAuctioned,
+    RevertAuctioned
 }
 
 /// <summary>Một việc đồng bộ đang chờ trong hàng đợi.</summary>
@@ -46,6 +48,9 @@ public sealed class CatalogSyncQueue : ICatalogSync
 
     public void MarkProductAuctioned(Guid productId, Guid auctionId) =>
         Enqueue(new CatalogSyncItem(CatalogSyncAction.MarkAuctioned, productId, auctionId));
+
+    public void RevertProductAuctioned(Guid productId, Guid auctionId) =>
+        Enqueue(new CatalogSyncItem(CatalogSyncAction.RevertAuctioned, productId, auctionId));
 
     private void Enqueue(CatalogSyncItem item)
     {
@@ -131,26 +136,52 @@ public sealed class CatalogSyncWorker : BackgroundService
             {
                 using var scope = _scopes.CreateScope();
 
-                if (item.Action == CatalogSyncAction.UnlockProduct)
+                var db = scope.ServiceProvider.GetRequiredService<IAuctionDbContext>();
+                if (item.Action is CatalogSyncAction.UnlockProduct or CatalogSyncAction.RevertAuctioned)
                 {
-                    var db = scope.ServiceProvider.GetRequiredService<IAuctionDbContext>();
                     var heldByAnotherAuction = await db.ProductOpenAuctions
                         .AsNoTracking()
                         .AnyAsync(p => p.ProductId == item.ProductId, cancellationToken);
                     if (heldByAnotherAuction)
                     {
                         _logger.LogInformation(
-                            "Product {ProductId} is held by another auction now: the unlock of auction {AuctionId} was skipped.",
-                            item.ProductId, item.AuctionId);
+                            "Product {ProductId} is held by another auction now: {Action} of auction {AuctionId} was skipped.",
+                            item.ProductId, item.Action, item.AuctionId);
                         return;
                     }
                 }
 
                 var catalog = scope.ServiceProvider.GetRequiredService<ICatalogClient>();
-                if (item.Action == CatalogSyncAction.UnlockProduct)
-                    await catalog.UnlockProductFromAuctionAsync(item.ProductId, cancellationToken);
-                else
-                    await catalog.MarkProductAuctionedAsync(item.ProductId, cancellationToken);
+                switch (item.Action)
+                {
+                    case CatalogSyncAction.UnlockProduct:
+                        await catalog.UnlockProductFromAuctionAsync(item.ProductId, cancellationToken);
+                        break;
+                    case CatalogSyncAction.MarkAuctioned:
+                        await catalog.MarkProductAuctionedAsync(item.ProductId, cancellationToken);
+                        break;
+                    case CatalogSyncAction.RevertAuctioned:
+                        await catalog.RevertProductAuctionedAsync(item.ProductId, cancellationToken);
+                        break;
+                }
+
+                if (item.Action is CatalogSyncAction.UnlockProduct or CatalogSyncAction.RevertAuctioned)
+                {
+                    var auction = await db.Auctions
+                        .FirstOrDefaultAsync(a => a.Id == item.AuctionId && !a.IsDeleted, cancellationToken);
+                    if (auction is not null && auction.StockReleaseState == BackgroundSyncState.Pending)
+                    {
+                        auction.StockReleaseState = BackgroundSyncState.Done;
+                        if (auction.ViolationState != BackgroundSyncState.Pending && auction.StreakResetState != BackgroundSyncState.Pending)
+                        {
+                            auction.LastError = null;
+                            auction.NextRetryAt = null;
+                            auction.NeedsAttention = false;
+                        }
+                        auction.UpdatedAt = DateTimeOffset.UtcNow;
+                        await db.SaveChangesAsync(cancellationToken);
+                    }
+                }
 
                 _logger.LogInformation(
                     "Catalog {Action} done for product {ProductId} (auction {AuctionId}).", item.Action, item.ProductId, item.AuctionId);

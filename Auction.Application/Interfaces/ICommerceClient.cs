@@ -4,7 +4,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 
-/// <summary>Dữ liệu settlement gửi sang Commerce để tạo đơn cho người thắng (POST /api/v1/auction-orders/settlement).</summary>
+/// <summary>Dữ liệu settlement gửi sang Commerce để tạo đơn cho người thắng hoặc người về nhì (POST /api/v1/auction-orders/settlement).</summary>
 public sealed record CommerceSettlementPayload(
     Guid AuctionId,
     Guid WinningBidId,
@@ -13,9 +13,11 @@ public sealed record CommerceSettlementPayload(
     Guid ProductId,
     Guid SkuId,
     string ProductName,
-    string? ImageUrl,
+    string? ProductImageUrl,
     decimal WinningAmount,
-    DateTimeOffset PaymentDeadlineAt);
+    DateTimeOffset PaymentDeadlineAt,
+    decimal DepositAmount = 0m,
+    string Source = "WINNER");
 
 public interface ICommerceClient
 {

@@ -20,6 +20,8 @@ public interface IAuctionDbContext
     DbSet<AuctionStatusHistory> AuctionStatusHistories { get; }
     DbSet<AuctionConfig> AuctionConfigs { get; }
     DbSet<IdempotencyKey> IdempotencyKeys { get; }
+    DbSet<AuctionDeposit> AuctionDeposits { get; }
+    DbSet<DepositCallbackEvent> DepositCallbackEvents { get; }
     DbSet<AuditLog> AuditLogs { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);

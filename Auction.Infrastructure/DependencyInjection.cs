@@ -47,7 +47,7 @@ public static class DependencyInjection
             var host = uri.Host;
             var port = uri.Port > 0 ? uri.Port : 5432;
             var db = uri.AbsolutePath.TrimStart('/');
-            return $"Host={host};Port={port};Database={db};Username={user};Password={pass};SSL Mode=Require;Trust Server Certificate=true";
+            return $"Host={host};Port={port};Database={db};Username={user};Password={pass};SSL Mode=Require;Trust Server Certificate=true;Channel Binding=Disable";
         }
         return connStr;
     }

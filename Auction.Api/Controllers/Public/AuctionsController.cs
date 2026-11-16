@@ -111,12 +111,27 @@ public class AuctionsController : ControllerBase
         return Ok(result);
     }
 
-    /// <summary>Gets the result (winner and final price) of an auction once it has been determined.</summary>
+    /// <summary>Gets the post-auction result and phase (winner, final price, settlement, myDeposit and secondChance) filtered by caller role (API 06).</summary>
     [HttpGet("{id:guid}/result")]
     [ProducesResponseType(typeof(AuctionResultDto), StatusCodes.Status200OK)]
     public async Task<ActionResult<AuctionResultDto>> GetResult([FromRoute] Guid id, CancellationToken ct)
     {
-        var result = await _auctionService.GetResultAsync(id, ct);
+        var callerId = this.GetUserId();
+        var isPrivileged = this.IsAdmin() || this.HasRole("staff");
+        var result = await _auctionService.GetResultAsync(id, callerId, isPrivileged, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Runner-up bidder views their own second-chance offer for a specific auction (API 09).</summary>
+    [HttpGet("{id:guid}/second-chance/me")]
+    [ProducesResponseType(typeof(MySecondChanceOfferDto), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetMySecondChanceOffer([FromRoute] Guid id, CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("buyer") && !this.HasRole("seller"))
+            return this.ForbiddenError("Only buyer or seller accounts can view second-chance offers.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.GetMySecondChanceOfferAsync(id, userId, ct);
         return Ok(result);
     }
 
@@ -157,6 +172,19 @@ public class AuctionsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Gets successful and failed auction statistics for a seller profile.</summary>
+    [HttpGet("~/api/v1/sellers/{sellerId:guid}/auction-statistics")]
+    [ProducesResponseType(typeof(SellerAuctionStatisticsDto), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetSellerAuctionStatistics(
+        [FromRoute] Guid sellerId, CancellationToken ct)
+    {
+        if (sellerId == Guid.Empty)
+            return this.BadRequestError("VAL_INVALID_INPUT", "Seller ID is required.");
+
+        var result = await _auctionService.GetSellerAuctionStatisticsAsync(sellerId, ct);
+        return Ok(result);
+    }
+
     /// <summary>Bidder được mời chấp nhận trở thành người thắng thay người thắng trước. Chỉ đúng bidder được mời mới gọi được.</summary>
     [HttpPost("{auctionId:guid}/winner-offers/{offerId:guid}/accept")]
     [ProducesResponseType(typeof(WinnerOfferResponse), StatusCodes.Status200OK)]
@@ -184,6 +212,42 @@ public class AuctionsController : ControllerBase
 
         var result = await _auctionService.DeclineWinnerOfferAsync(
             CreateActor(userId), auctionId, offerId, request ?? new DeclineWinnerOfferRequest(null), ct);
+        return Ok(result);
+    }
+
+    /// <summary>Người về nhì chấp nhận mua theo giá bid của chính mình sau khi người thắng trước không thanh toán (API 07).</summary>
+    [HttpPost("{id:guid}/second-chance/accept")]
+    [ProducesResponseType(typeof(SecondChanceAcceptResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> AcceptSecondChance(
+        [FromRoute] Guid id,
+        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
+        [FromBody] AcceptSecondChanceRequest request,
+        CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("buyer") && !this.HasRole("seller"))
+            return this.ForbiddenError("Only buyer or seller accounts can respond to second-chance offers.");
+
+        var result = await _auctionService.AcceptSecondChanceOfferAsync(
+            CreateActor(userId), id, idempotencyKey, request, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Người về nhì từ chối lời mời mua lại (API 08). Phiên chuyển sang Failed, không tính vi phạm Streak.</summary>
+    [HttpPost("{id:guid}/second-chance/decline")]
+    [ProducesResponseType(typeof(SecondChanceDeclineResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> DeclineSecondChance(
+        [FromRoute] Guid id,
+        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
+        [FromBody] DeclineWinnerOfferRequest? request,
+        CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("buyer") && !this.HasRole("seller"))
+            return this.ForbiddenError("Only buyer or seller accounts can respond to second-chance offers.");
+
+        var result = await _auctionService.DeclineSecondChanceOfferAsync(
+            CreateActor(userId), id, idempotencyKey, request ?? new DeclineWinnerOfferRequest(null), ct);
         return Ok(result);
     }
 

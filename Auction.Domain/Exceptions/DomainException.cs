@@ -5,6 +5,9 @@ public class DomainException : Exception
     public string ErrorCode { get; }
     public int StatusCode { get; }
 
+    /// <summary>Optional extra data returned to the client as "details" (for example the shortfall of a wallet balance).</summary>
+    public object? Details { get; init; }
+
     public DomainException(string message) : base(message)
     {
         ErrorCode = "DOMAIN_ERROR";

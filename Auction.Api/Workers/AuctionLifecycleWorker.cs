@@ -17,10 +17,12 @@ public sealed class AuctionLifecycleWorker : BackgroundService
 {
     private const int DefaultIntervalSeconds = 5;
     private const int BatchSize = 50;
+    private static readonly TimeSpan BackgroundRetryInterval = TimeSpan.FromMinutes(1);
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IConfiguration _configuration;
     private readonly ILogger<AuctionLifecycleWorker> _logger;
+    private DateTimeOffset _lastBackgroundRetryAt = DateTimeOffset.MinValue;
 
     /// <summary>Khởi tạo worker với bộ tạo scope, cấu hình và logger.</summary>
     public AuctionLifecycleWorker(
@@ -85,6 +87,17 @@ public sealed class AuctionLifecycleWorker : BackgroundService
                 cancellationToken.ThrowIfCancellationRequested();
                 if (await ProcessAsync(offerId, "expire winner offer", s => s.ExpireWinnerOfferAsync(offerId, cancellationToken)))
                     _logger.LogInformation("Winner offer {OfferId} expired.", offerId);
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            if (now - _lastBackgroundRetryAt >= BackgroundRetryInterval)
+            {
+                _lastBackgroundRetryAt = now;
+                await InScopeAsync(async s =>
+                {
+                    await s.ProcessDueBackgroundTasksAsync(BatchSize, cancellationToken);
+                    return true;
+                });
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

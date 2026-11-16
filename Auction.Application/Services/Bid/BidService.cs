@@ -14,6 +14,7 @@ using global::Auction.Application.Common;
 using global::Auction.Application.Common.Extensions;
 using global::Auction.Application.Common.Models;
 using global::Auction.Application.Interfaces;
+using global::Auction.Application.Services.Deposit;
 using global::Auction.Domain.Entities;
 using global::Auction.Domain.Enums;
 using global::Auction.Domain.Exceptions;
@@ -30,16 +31,19 @@ public sealed class BidService : IBidService
     private readonly TimeProvider _clock;
     private readonly IAuctionNotifier _notifier;
     private readonly INotificationClient _notifications;
+    private readonly IDepositService _deposits;
 
-    /// <summary>Khởi tạo service với DbContext, User client, đồng hồ hệ thống, bộ thông báo realtime và client gửi thông báo sang Notification service.</summary>
+    /// <summary>Khởi tạo service với DbContext, User client, đồng hồ hệ thống, bộ thông báo realtime, client thông báo và service cọc.</summary>
     public BidService(
-        IAuctionDbContext dbContext, IUserClient users, TimeProvider clock, IAuctionNotifier notifier, INotificationClient notifications)
+        IAuctionDbContext dbContext, IUserClient users, TimeProvider clock, IAuctionNotifier notifier,
+        INotificationClient notifications, IDepositService deposits)
     {
         _dbContext = dbContext;
         _users = users;
         _clock = clock;
         _notifier = notifier;
         _notifications = notifications;
+        _deposits = deposits;
     }
 
     // ------------------------------------------------------------------ History
@@ -139,7 +143,8 @@ public sealed class BidService : IBidService
 
     /// <summary>
     /// Đặt giá cho một phiên. Bắt buộc có Idempotency-Key và If-Match (RowVersion); gửi lại cùng key và cùng nội dung thì trả kết quả lần đầu, khác nội dung thì 422.
-    /// Chặn seller đặt giá phiên của chính mình; kiểm tra phiên đang chạy, giá tối thiểu và quyền đặt giá với User service.
+    /// Chặn seller đặt giá phiên của chính mình; kiểm tra phiên đang chạy, cọc còn hiệu lực, bidder không bị hạn chế đấu giá và giá tối thiểu.
+    /// Điểm uy tín của Buyer không còn chặn đặt giá: nó chỉ quyết định mức cọc.
     /// Khi hợp lệ: lưu bid, đánh dấu bid dẫn đầu cũ là bị vượt, cập nhật giá hiện tại, gia hạn chống bắn tỉa nếu đặt sát giờ kết thúc,
     /// lưu idempotency và audit, rồi báo realtime BidPlaced sau khi lưu thành công. Response và sự kiện kèm giá cũ (PreviousPriceAmount)
     /// và RowVersion mới để FE dùng làm If-Match cho lần đặt giá tiếp theo.
@@ -191,22 +196,23 @@ public sealed class BidService : IBidService
 
         BidRules.EnsureBiddable(state.Status, state.ScheduledEndAt, now);
 
+        // 3b. The bidder needs an Authorized deposit that will not expire right away. This may ask Wallet once when the hold is close to its end.
+        await _deposits.EnsureBidderDepositValidAsync(auctionId, actor.UserId, now, cancellationToken);
+
+        // 3c. User only supplies facts (cached for a short time): a banned or auction-restricted bidder cannot bid. No answer means no bid.
+        var profile = await _users.GetAuctionDepositProfileAsync(actor.UserId, bypassCache: false, cancellationToken);
+        DepositProfileGuard.EnsureCanJoin(profile);
+
         // 4. The bidder saw an older version of the auction: someone else bid first.
         if (state.RowVersion != expectedRowVersion)
             throw new DomainException(
                 "CONCURRENT_UPDATE", "The auction changed since it was loaded. Reload it and try again.", 409);
 
-        // 5. User must confirm the bidder (reputation, account status). No answer means no bid.
-        var eligibility = await _users.VerifyBidEligibilityAsync(actor.UserId, cancellationToken);
-        if (!eligibility.Eligible)
-            throw UserEligibilityErrors.FromFailureReason(
-                eligibility.FailureReason, "place a bid", "BIDDER_NOT_ELIGIBLE", "The user is not eligible to place a bid.");
-
-        // 6. The amount must reach the minimum.
+        // 5. The amount must reach the minimum.
         var minNextBid = BidRules.MinNextBid(auction.StartPriceAmount, auction.BidStepAmount, state.CurrentPriceAmount);
         BidRules.EnsureMeetsMinimum(amount, minNextBid);
 
-        // 7. Write everything in one SaveChanges.
+        // 6. Write everything in one SaveChanges.
         var previousWinner = await _dbContext.BidHistories
             .Where(h => h.AuctionId == auctionId && h.IsWinning)
             .ToListAsync(cancellationToken);
