@@ -14,8 +14,8 @@ using Microsoft.Extensions.Logging;
 /// </summary>
 public sealed class WalletClient : IWalletClient
 {
-    // Wallet exposes plain REST routes under /api/v1/wallets (no /internal prefix, no service key), like the other Wallet routes.
-    private const string HoldsPath = "/api/v1/wallets/deposit-holds";
+    // Wallet exposes plain REST routes under /api/v1/wallets/holds (Direction C: W1–W5).
+    private const string HoldsPath = "/api/v1/wallets/holds";
 
     private static readonly TimeSpan CreateTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan ReadTimeout = TimeSpan.FromSeconds(5);
@@ -77,7 +77,7 @@ public sealed class WalletClient : IWalletClient
     {
         using var request = new HttpRequestMessage(
             HttpMethod.Get,
-            $"{HoldsPath}/by-reference?referenceType=AUCTION_DEPOSIT&referenceId={Uri.EscapeDataString(referenceId.ToString())}");
+            $"{HoldsPath}/by-reference/AUCTION_DEPOSIT/{Uri.EscapeDataString(referenceId.ToString())}");
 
         var (status, payload) = await SendAsync(request, ReadTimeout, cancellationToken);
         if (status == HttpStatusCode.NotFound)

@@ -155,13 +155,22 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             return false;
         }
 
-        var winningBid = await _dbContext.BidHistories
+        var validBids = await _dbContext.BidHistories
             .AsNoTracking()
             .Where(h => h.AuctionId == auctionId && !h.IsInvalidated && !h.IsDeleted)
             .OrderByDescending(h => h.Amount)
             .ThenBy(h => h.SequenceNo)
             .Select(h => new { h.BidId, h.BidderId, h.Amount })
-            .FirstOrDefaultAsync(cancellationToken);
+            .ToListAsync(cancellationToken);
+
+        var topBidders = validBids
+            .GroupBy(b => b.BidderId)
+            .Select(g => g.First())
+            .Take(2)
+            .ToList();
+
+        var winningBid = topBidders.FirstOrDefault();
+        var runnerUpBidderId = topBidders.Count > 1 ? topBidders[1].BidderId : (Guid?)null;
 
         state.EndedAt = now;
         state.UpdatedAt = now;
@@ -269,11 +278,13 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             oldValues: new { status = AuctionStatus.Running.ToString() },
             newValues: newValues);
 
-        // Đánh dấu giải phóng cọc cho các bidder không thắng (hoặc tất cả bidder nếu phiên không có bid hợp lệ).
+        // Quy tắc giữ cọc Top 2: Giữ nguyên cọc của Winner (hạng 1) và Người về nhì tiềm năng (hạng 2);
+        // chỉ mở khoá cọc từ hạng 3 trở xuống (hoặc mở khoá toàn bộ nếu phiên không có bid hợp lệ).
         var depositsToRelease = await _dbContext.AuctionDeposits
             .Where(d => d.AuctionId == auctionId && !d.IsDeleted &&
                         (d.Status == DepositStatus.Authorized || d.Status == DepositStatus.Pending) &&
-                        (winningBid == null || d.BidderId != winningBid.BidderId))
+                        (winningBid == null ||
+                         (d.BidderId != winningBid.BidderId && (runnerUpBidderId == null || d.BidderId != runnerUpBidderId.Value))))
             .ToListAsync(cancellationToken);
 
         var releaseReason = winningBid is null ? "AUCTION_FAILED" : "AUCTION_ENDED_NOT_WINNER";
@@ -368,6 +379,7 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
         offer.UpdatedAt = now;
 
         var failAuction = state is not null && state.Status == AuctionStatus.Ended;
+        var depositsToReleaseCount = 0;
         if (failAuction)
         {
             state!.Status = AuctionStatus.Failed;
@@ -376,6 +388,30 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             auction!.StockReleaseState = BackgroundSyncState.Pending;
             auction.NextRetryAt = now;
             auction.NeedsAttention = false;
+
+            // Lời mời quá hạn mà chưa nhận: không tính là bỏ kèo, mở khoá toàn bộ cọc còn đang giữ của phiên (cọc của người về nhì).
+            var remainingDeposits = await _dbContext.AuctionDeposits
+                .Where(d => d.AuctionId == offer.AuctionId && !d.IsDeleted &&
+                            (d.Status == DepositStatus.Authorized || d.Status == DepositStatus.Pending))
+                .ToListAsync(cancellationToken);
+            foreach (var deposit in remainingDeposits)
+            {
+                var oldDepositStatus = deposit.Status;
+                deposit.Status = DepositStatus.Released;
+                deposit.ReleaseReason = "SECOND_CHANCE_EXPIRED";
+                deposit.ReleasePending = true;
+                deposit.PendingAction = DepositPendingAction.Release;
+                deposit.NextRetryAt = now;
+                deposit.NeedsAttention = false;
+                deposit.UpdatedAt = now;
+                deposit.RowVersion += 1;
+
+                _dbContext.AddAuditLog(
+                    AuditAction.DepositRelease, "AuctionDeposit", deposit.Id.ToString(),
+                    oldValues: new { status = oldDepositStatus },
+                    newValues: new { depositId = deposit.Id, status = deposit.Status, releaseReason = deposit.ReleaseReason, releasePending = deposit.ReleasePending });
+            }
+            depositsToReleaseCount = remainingDeposits.Count;
 
             // Nhả sản phẩm để seller tạo lại phiên. Index unique theo ProductId bỏ qua xoá mềm nên phải xoá thật dòng này.
             var openAuction = await _dbContext.ProductOpenAuctions
@@ -411,6 +447,9 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
 
         if (failAuction)
         {
+            if (depositsToReleaseCount > 0)
+                await _deposits.ReleasePendingDepositsForAuctionAsync(offer.AuctionId, cancellationToken);
+
             // Đã lưu: mở khoá sản phẩm ở Catalog (gửi nền, có thử lại), rồi báo realtime phiên đã Failed.
             _catalogSync.UnlockProduct(auction!.ProductId, offer.AuctionId);
             _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
@@ -493,16 +532,12 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             {
                 try
                 {
-                    decimal forfeited = 0m;
-                    if (!isSecondChance)
-                    {
-                        var depAmount = await _dbContext.AuctionDeposits
-                            .AsNoTracking()
-                            .Where(d => d.AuctionId == auction.Id && d.BidderId == buyerId.Value && !d.IsDeleted)
-                            .Select(d => (decimal?)d.Amount)
-                            .FirstOrDefaultAsync(cancellationToken);
-                        forfeited = depAmount ?? 0m;
-                    }
+                    var depAmount = await _dbContext.AuctionDeposits
+                        .AsNoTracking()
+                        .Where(d => d.AuctionId == auction.Id && d.BidderId == buyerId.Value && !d.IsDeleted)
+                        .Select(d => (decimal?)d.Amount)
+                        .FirstOrDefaultAsync(cancellationToken);
+                    var forfeited = depAmount ?? 0m;
 
                     var violationType = isSecondChance ? "SecondChanceNonPayment" : "WinnerNonPayment";
                     await _users.RecordAuctionViolationAsync(

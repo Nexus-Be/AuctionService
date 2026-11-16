@@ -924,7 +924,14 @@ public sealed class DepositService : IDepositService
                 .Select(a => new { a.SellerId })
                 .FirstOrDefaultAsync(cancellationToken);
 
-            var transfers = BuildCaptureTransfers(deposit, purpose, auction?.SellerId);
+            decimal sellerPercent = 70m;
+            if (string.Equals(purpose, "Forfeit", StringComparison.OrdinalIgnoreCase))
+            {
+                var policy = await DepositPolicyReader.ReadByVersionAsync(_dbContext, deposit.PolicyVersion, cancellationToken);
+                sellerPercent = policy.SellerPercent;
+            }
+
+            var transfers = BuildCaptureTransfers(deposit, purpose, auction?.SellerId, sellerPercent);
             await _wallet.CaptureDepositHoldAsync(
                 deposit.GatewayReference,
                 new CaptureDepositHoldCommand(purpose, deposit.Amount, transfers),
@@ -1071,11 +1078,12 @@ public sealed class DepositService : IDepositService
     }
 
     private static IReadOnlyList<HoldTransferInstruction> BuildCaptureTransfers(
-        AuctionDeposit deposit, string purpose, Guid? sellerId)
+        AuctionDeposit deposit, string purpose, Guid? sellerId, decimal sellerPercent = 70m)
     {
         if (string.Equals(purpose, "Forfeit", StringComparison.OrdinalIgnoreCase) && sellerId.HasValue)
         {
-            var sellerShare = Math.Floor(deposit.Amount * 0.70m);
+            var clampedSellerPercent = Math.Clamp(sellerPercent, 0m, 100m);
+            var sellerShare = Math.Floor(deposit.Amount * clampedSellerPercent / 100m);
             var platformShare = deposit.Amount - sellerShare;
             var list = new List<HoldTransferInstruction>();
             if (sellerShare > 0m)
