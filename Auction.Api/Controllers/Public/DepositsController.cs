@@ -58,17 +58,6 @@ public class DepositsController : ControllerBase
         return Ok(result);
     }
 
-    // [Deprecated in v0.4 / Direction C — Synchronous Wallet balance hold replaces async callback]
-    // [HttpPost("~/api/v1/deposits/{depositId:guid}/authorization-result")]
-    // [RequireInternalServiceKey]
-    // [ProducesResponseType(typeof(DepositAuthorizationResultResponse), StatusCodes.Status200OK)]
-    // public async Task<ActionResult<DepositAuthorizationResultResponse>> HandleAuthorizationResult(
-    //     [FromRoute] Guid depositId, [FromBody] DepositAuthorizationResultRequest request, CancellationToken ct)
-    // {
-    //     var result = await _depositService.ApplyAuthorizationResultAsync(depositId, request, ct);
-    //     return Ok(result);
-    // }
-
     /// <summary>Admin or Staff reviews all deposits for an auction (for reconciliation, complaints and stuck operation monitoring).</summary>
     [HttpGet("~/api/v1/admin/auctions/{auctionId:guid}/deposits")]
     [ProducesResponseType(typeof(AdminAuctionDepositsResponse), StatusCodes.Status200OK)]

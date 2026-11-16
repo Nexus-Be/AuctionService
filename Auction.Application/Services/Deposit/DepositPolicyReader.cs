@@ -32,6 +32,23 @@ internal static class DepositPolicyReader
         return config is null ? DepositRules.DefaultPolicy : Parse(config.Version, config.ConfigValue);
     }
 
+    public static async Task<DepositPolicy> ReadByVersionAsync(
+        IAuctionDbContext dbContext, int version, CancellationToken cancellationToken)
+    {
+        if (version > 0)
+        {
+            var specific = await dbContext.AuctionConfigs
+                .AsNoTracking()
+                .Where(c => c.ConfigKey == ConfigKey && c.Version == version && !c.IsDeleted)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (specific is not null)
+                return Parse(specific.Version, specific.ConfigValue);
+        }
+
+        return await ReadAsync(dbContext, cancellationToken);
+    }
+
     internal static DepositPolicy Parse(int version, string json)
     {
         PolicyJson? policy;
