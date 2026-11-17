@@ -61,6 +61,33 @@ public sealed class CommerceClient : ICommerceClient
         }
     }
 
+    public async Task<AuctionOrderNotificationSnapshot?> GetOrderNotificationSnapshotAsync(Guid orderId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var response = await _http.GetAsync($"/api/v1/internal/auction-orders/{orderId}/notification-snapshot", cancellationToken);
+            var status = (int)response.StatusCode;
+            if (status == 404)
+                return null;
+            if (status >= 500 || status is 408 or 429)
+                throw new DomainException("COMMERCE_SERVICE_UNAVAILABLE", $"Commerce answered HTTP {status} to the order snapshot.", 503);
+            if (!response.IsSuccessStatusCode)
+                throw new DomainException("COMMERCE_REJECTED_SNAPSHOT", $"Commerce rejected the order snapshot request: HTTP {status}.", 502);
+
+            var text = await response.Content.ReadAsStringAsync(cancellationToken);
+            using var document = JsonDocument.Parse(text);
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object)
+                root = data;
+            return root.Deserialize<AuctionOrderNotificationSnapshot>(JsonOptions);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException
+            || (ex is OperationCanceledException && !cancellationToken.IsCancellationRequested))
+        {
+            throw new DomainException("COMMERCE_SERVICE_UNAVAILABLE", "The commerce service is unavailable.", 503);
+        }
+    }
+
     /// <summary>Lấy mã đơn từ câu trả lời của Commerce: orderId ở gốc hoặc trong data, không có thì thử trường id.</summary>
     private static Guid? ReadOrderId(string text)
     {

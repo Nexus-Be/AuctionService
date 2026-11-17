@@ -3,8 +3,10 @@ namespace Auction.Application.Interfaces;
 using System;
 
 /// <summary>
-/// Gửi thông báo sang Notification service. Các hàm chỉ đưa thông báo vào hàng đợi rồi trả về ngay, không chờ và không ném lỗi,
-/// để việc gửi thông báo không bao giờ làm chậm hay làm hỏng nghiệp vụ đấu giá. Việc gửi thật chạy nền và chỉ ghi log khi lỗi.
+/// Queues a notification for the Notification service. The methods only <b>add a row to the notification outbox of the current unit of work</b>
+/// (they do not save and do not call the network), so the caller must call them <b>before</b> the SaveChanges that stores the business change:
+/// the event is then committed in the same transaction and a crash right after the commit cannot lose it. A worker sends the rows afterwards,
+/// with retries, using the same event id and payload. When notifications are disabled the methods do nothing.
 /// </summary>
 public interface INotificationClient
 {
@@ -22,7 +24,28 @@ public interface INotificationClient
 
     /// <summary>Báo cho bidder kế tiếp khi họ được mời thay winner trước đó.</summary>
     void NotifyReplacementWinnerOffer(ReplacementWinnerOfferNotification notification);
+
+    /// <summary>
+    /// Tells buyer and seller that an auction order was paid. Queue it in the same SaveChanges that stores the settlement as Paid.
+    /// Fields Commerce did not send (OrderNo, TotalAmount, SellerAcceptDeadline) are fetched by the worker before anything is sent.
+    /// </summary>
+    void NotifyAuctionOrderPaid(AuctionOrderPaidNotification notification);
 }
+
+/// <summary>An auction order that was just paid. The auction itself is still Ended (it becomes Settled only after the seller accepts).</summary>
+public sealed record AuctionOrderPaidNotification(
+    Guid AuctionId,
+    Guid ResultId,
+    Guid WinningBidId,
+    Guid OrderId,
+    Guid BuyerUserId,
+    Guid SellerUserId,
+    DateTimeOffset PaidAt,
+    string AuctionStatus,
+    string? OrderNo,
+    decimal? TotalAmount,
+    DateTimeOffset? SellerAcceptDeadline,
+    string? TraceId);
 
 /// <summary>Dữ liệu thông báo bị vượt giá: bid mới (TriggerBidId) đã vượt bid đang dẫn đầu trước đó (PreviousBidId). Tiền tệ luôn là VND.</summary>
 public sealed record BidOutbidNotification(

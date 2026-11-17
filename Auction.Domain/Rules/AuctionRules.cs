@@ -39,19 +39,25 @@ public static class AuctionRules
             throw Invalid("VAL_INVALID_PRICE", "Start price must be zero or greater and have at most two decimal places.");
     }
 
-    /// <summary>A bid step that is sent must be greater than zero, with at most two decimal places.</summary>
+    /// <summary>A bid step that is sent must be a positive whole-thousand amount (multiple of 1,000 VND).</summary>
     public static void ValidateBidStep(decimal? bidStepAmount)
     {
         if (bidStepAmount is null)
             throw Invalid("VAL_INVALID_PRICE", "Bid step is required.");
-        if (bidStepAmount <= 0m || HasMoreThanTwoDecimals(bidStepAmount.Value))
-            throw Invalid("VAL_INVALID_PRICE", "Bid step must be greater than zero and have at most two decimal places.");
+        if (bidStepAmount <= 0m
+            || bidStepAmount.Value != decimal.Truncate(bidStepAmount.Value)
+            || bidStepAmount.Value % 1000m != 0m)
+        {
+            throw Invalid(
+                "VAL_INVALID_PRICE",
+                "Bid step must be a positive whole-thousand amount (multiple of 1,000).");
+        }
     }
 
     /// <summary>
     /// Returns the bid step of the auction. A step sent by the seller is validated and used as is.
-    /// Without one, the step is the default percent of the start price, rounded to two decimals.
-    /// A start price too small to give a step above zero (for example 0) needs the seller to send a step.
+    /// Without one, the step is the default percent of the start price, rounded to the nearest 1,000.
+    /// A start price too small to give a step of at least 1,000 needs the seller to send a step.
     /// </summary>
     public static decimal ResolveBidStep(decimal? startPriceAmount, decimal? bidStepAmount, decimal defaultPercent)
     {
@@ -63,7 +69,8 @@ public static class AuctionRules
             return bidStepAmount.Value;
         }
 
-        var step = decimal.Round(startPriceAmount!.Value * defaultPercent / 100m, 2, MidpointRounding.AwayFromZero);
+        var rawStep = startPriceAmount!.Value * defaultPercent / 100m;
+        var step = decimal.Round(rawStep / 1000m, 0, MidpointRounding.AwayFromZero) * 1000m;
         if (step <= 0m)
             throw Invalid(
                 "VAL_INVALID_PRICE",

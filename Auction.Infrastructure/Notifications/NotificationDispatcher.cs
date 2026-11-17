@@ -2,57 +2,56 @@ namespace Auction.Infrastructure.Notifications;
 
 using System;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
-using System.Security.Cryptography;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
+using Auction.Application.Interfaces;
+using Auction.Domain.Entities;
+using Auction.Domain.Enums;
+using Auction.Domain.Exceptions;
+using Auction.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Auction.Application.Interfaces;
 
 /// <summary>
-/// Đọc hàng đợi và gửi từng thông báo sang Notification service ở nền.
-/// Bị vượt giá: POST /api/v1/notifications/auction-outbids. Người thắng: POST /api/v1/notifications/auction-winners (cần email người thắng, tra từ User service).
-/// Phiên thất bại, huỷ và lời mời winner thay thế lần lượt gửi tới auction-failed, auction-cancelled và auction-winner-offers.
-/// Mã sự kiện (sourceEventId) được sinh cố định từ dữ liệu nghiệp vụ nên gửi lại cùng thông báo là an toàn: Notification trả lại kết quả cũ, không gửi trùng.
-/// Lỗi tạm thời (5xx, 408, 429, hết giờ chờ, mất kết nối) thử lại tối đa NotificationOptions.MaxAttempts lần; lỗi 4xx khác chỉ ghi log. Không có outbox nên thông báo cuối cùng thất bại sẽ bị bỏ.
+/// Sends the notifications saved in the outbox (see <see cref="NotificationClient"/>) to the Notification service through the Gateway.
+/// A row is picked with a lease (an atomic conditional UPDATE), so several instances never send the same row. Rows that still miss data
+/// (AwaitingData) are completed first and only a complete payload is ever frozen and sent. A temporary failure (timeout, 408, 429, 5xx) is
+/// retried with growing delays and always with the same event id and payload; a permanent failure (a 4xx answer: the contract, the token,
+/// a conflicting event) is not retried and the row becomes NeedsAttention. A row that has not worked 24 hours after it was created also
+/// becomes NeedsAttention. Notification treats a repeated event id as the same event, so sending a row again after a crash is safe.
 /// </summary>
 public sealed class NotificationDispatcher : BackgroundService
 {
-    /// <summary>Tên HttpClient gọi Notification service (đăng ký trong Program.cs).</summary>
+    /// <summary>Named HttpClient that calls the Gateway (registered in Program.cs).</summary>
     public const string NotificationHttpClient = "notification-service";
 
-    /// <summary>Tên HttpClient gọi User service để lấy email người thắng (đăng ký trong Program.cs).</summary>
+    /// <summary>Named HttpClient that calls the User service for contact and shop data (registered in Program.cs).</summary>
     public const string UserHttpClient = "notification-user-contact";
 
-    private const string OutbidPath = "/api/v1/notifications/auction-outbids";
-    private const string WinnerPath = "/api/v1/notifications/auction-winners";
-    private const string FailedPath = "/api/v1/notifications/auction-failed";
-    private const string CancelledPath = "/api/v1/notifications/auction-cancelled";
-    private const string ReplacementWinnerOfferPath = "/api/v1/notifications/auction-winner-offers";
-
-    // Endpoint đề xuất bên User service (hiện chưa có): nhận { "userId": guid }, trả email và fullName (có thể nằm trong "data").
     private const string UserContactPath = "/api/v1/internal/users/contact-info";
+    private const int BatchSize = 20;
+    private static readonly TimeSpan Lease = TimeSpan.FromMinutes(2);
 
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-    };
-
-    private readonly NotificationClient _client;
+    private readonly IServiceScopeFactory _scopes;
     private readonly IHttpClientFactory _httpFactory;
     private readonly NotificationOptions _options;
+    private readonly TimeProvider _clock;
     private readonly ILogger<NotificationDispatcher> _logger;
 
     public NotificationDispatcher(
-        NotificationClient client, IHttpClientFactory httpFactory, NotificationOptions options, ILogger<NotificationDispatcher> logger)
+        IServiceScopeFactory scopes, IHttpClientFactory httpFactory, NotificationOptions options, TimeProvider clock, ILogger<NotificationDispatcher> logger)
     {
-        _client = client;
+        _scopes = scopes;
         _httpFactory = httpFactory;
         _options = options;
+        _clock = clock;
         _logger = logger;
     }
 
@@ -64,209 +63,317 @@ public sealed class NotificationDispatcher : BackgroundService
             return;
         }
 
-        _logger.LogInformation("Notification dispatcher started. Notification service: {BaseUrl}.", _options.BaseUrl);
+        if (!ServiceTokenFactory.IsUsable(_options.SigningKey))
+            _logger.LogError("Notification:SigningKey (AUCTION_NOTIFICATION_SIGNING_KEY) is missing or shorter than 32 bytes: nothing can be sent, queued notifications will wait.");
+
+        _logger.LogInformation("Notification dispatcher started. Gateway: {BaseUrl}.", _options.BaseUrl);
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            var handled = 0;
+            try
+            {
+                handled = await RunOnceAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "The notification outbox scan failed; it will run again.");
+            }
+
+            try
+            {
+                await Task.Delay(handled > 0 ? TimeSpan.FromSeconds(1) : TimeSpan.FromSeconds(5), stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+        }
+    }
+
+    /// <summary>One scan: gives up rows that are too old, then claims and handles the rows that are due. Returns how many rows it handled.</summary>
+    public async Task<int> RunOnceAsync(CancellationToken cancellationToken)
+    {
+        using var scope = _scopes.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var now = _clock.GetUtcNow();
+
+        await db.NotificationOutbox
+            .Where(x => (x.Status == NotificationOutboxStatus.Pending || x.Status == NotificationOutboxStatus.AwaitingData) && x.GiveUpAt <= now)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(x => x.Status, NotificationOutboxStatus.NeedsAttention)
+                .SetProperty(x => x.LastError, x => x.LastError ?? "GAVE_UP_AFTER_24H")
+                .SetProperty(x => x.UpdatedAt, now), cancellationToken);
+
+        var due = await db.NotificationOutbox.AsNoTracking()
+            .Where(x => (x.Status == NotificationOutboxStatus.Pending || x.Status == NotificationOutboxStatus.AwaitingData)
+                        && x.NextRetryAt <= now && (x.LockedUntil == null || x.LockedUntil < now))
+            .OrderBy(x => x.NextRetryAt)
+            .Select(x => x.Id)
+            .Take(BatchSize)
+            .ToListAsync(cancellationToken);
+
+        var handled = 0;
+        foreach (var id in due)
+        {
+            // Atomic claim: only one instance gets the row. The lease frees it again if this instance dies half way.
+            var claimed = await db.NotificationOutbox
+                .Where(x => x.Id == id
+                            && (x.Status == NotificationOutboxStatus.Pending || x.Status == NotificationOutboxStatus.AwaitingData)
+                            && x.NextRetryAt <= now && (x.LockedUntil == null || x.LockedUntil < now))
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(x => x.LockedUntil, now.Add(Lease))
+                    .SetProperty(x => x.AttemptCount, x => x.AttemptCount + 1), cancellationToken);
+            if (claimed == 0)
+                continue;
+
+            db.ChangeTracker.Clear();
+            var item = await db.NotificationOutbox.SingleAsync(x => x.Id == id, cancellationToken);
+            await HandleAsync(scope.ServiceProvider, db, item, cancellationToken);
+            handled++;
+        }
+
+        return handled;
+    }
+
+    private async Task HandleAsync(IServiceProvider services, AppDbContext db, NotificationOutboxItem item, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (item.Status == NotificationOutboxStatus.AwaitingData)
+            {
+                var completion = await CompleteAsync(services, item, cancellationToken);
+                if (completion.Payload is null)
+                {
+                    await FinishAsync(db, item, completion.Permanent ? Outcome.Permanent : Outcome.Temporary, completion.Error, cancellationToken);
+                    return;
+                }
+
+                item.PayloadJson = completion.Payload;
+                item.Status = NotificationOutboxStatus.Pending;
+                item.ContextJson = null;
+                await db.SaveChangesAsync(cancellationToken);
+            }
+
+            var result = await SendAsync(item, cancellationToken);
+            await FinishAsync(db, item, result.Outcome, result.Error, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Handling the {Kind} notification {EventId} failed.", item.Kind, item.EventId);
+            await FinishAsync(db, item, Outcome.Temporary, ex.GetType().Name + ": " + ex.Message, cancellationToken);
+        }
+    }
+
+    public enum Outcome { Accepted, Temporary, Permanent }
+
+    public sealed record Attempt(Outcome Outcome, string? Error);
+
+    private async Task FinishAsync(AppDbContext db, NotificationOutboxItem item, Outcome outcome, string? error, CancellationToken cancellationToken)
+    {
+        var now = _clock.GetUtcNow();
+        item.LockedUntil = null;
+        item.UpdatedAt = now;
+        item.LastError = NotificationPayloads.Clip(error, 500);
+
+        switch (outcome)
+        {
+            case Outcome.Accepted:
+                item.Status = NotificationOutboxStatus.Sent;
+                item.SentAt = now;
+                item.LastError = null;
+                _logger.LogInformation("The {Kind} notification {EventId} of auction {AuctionId} was accepted by the Notification service.",
+                    item.Kind, item.EventId, item.AuctionId);
+                break;
+
+            case Outcome.Permanent:
+                item.Status = NotificationOutboxStatus.NeedsAttention;
+                _logger.LogError("The {Kind} notification {EventId} of auction {AuctionId} needs attention and will not be retried: {Error}",
+                    item.Kind, item.EventId, item.AuctionId, item.LastError);
+                break;
+
+            default:
+                if (now >= item.GiveUpAt)
+                {
+                    item.Status = NotificationOutboxStatus.NeedsAttention;
+                    item.LastError ??= "GAVE_UP_AFTER_24H";
+                    _logger.LogError("The {Kind} notification {EventId} of auction {AuctionId} was given up after 24 hours: {Error}",
+                        item.Kind, item.EventId, item.AuctionId, item.LastError);
+                }
+                else
+                {
+                    item.NextRetryAt = now.Add(NotificationOptions.Backoff(item.AttemptCount));
+                    _logger.LogWarning("The {Kind} notification {EventId} of auction {AuctionId} will be retried at {RetryAt} (attempt {Attempt}): {Error}",
+                        item.Kind, item.EventId, item.AuctionId, item.NextRetryAt, item.AttemptCount, item.LastError);
+                }
+
+                break;
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    // ------------------------------------------------------------------ sending
+
+    private async Task<Attempt> SendAsync(NotificationOutboxItem item, CancellationToken cancellationToken)
+    {
+        if (!ServiceTokenFactory.IsUsable(_options.SigningKey))
+            return new Attempt(Outcome.Temporary, "SIGNING_KEY_MISSING");
+
+        var http = _httpFactory.CreateClient(NotificationHttpClient);
+        using var request = new HttpRequestMessage(HttpMethod.Post, NotificationPayloads.PathOf(item.Kind))
+        {
+            Content = new StringContent(item.PayloadJson ?? "{}", Encoding.UTF8, "application/json")
+        };
+        // A fresh token per attempt: it lives two minutes, a retry minutes later needs a new one.
+        request.Headers.Authorization = new AuthenticationHeaderValue(
+            "Bearer", ServiceTokenFactory.Create(_options.SigningKey!, _options.ServiceUserId, _clock.GetUtcNow()));
 
         try
         {
-            await foreach (var item in _client.Reader.ReadAllAsync(stoppingToken))
-            {
-                try
-                {
-                    await DeliverAsync(item, stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Could not deliver a notification.");
-                }
-            }
+            using var response = await http.SendAsync(request, cancellationToken);
+            return Classify((int)response.StatusCode, response.IsSuccessStatusCode ? null : await ReadSnippetAsync(response, cancellationToken));
         }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        catch (Exception ex) when ((ex is HttpRequestException || ex is TaskCanceledException) && !cancellationToken.IsCancellationRequested)
         {
-            // Service đang tắt.
+            return new Attempt(Outcome.Temporary, ex.GetType().Name + ": " + ex.Message);
         }
     }
 
-    private async Task DeliverAsync(NotificationWorkItem item, CancellationToken cancellationToken)
+    /// <summary>2xx accepted; 408, 429 and 5xx are temporary; every other answer is a permanent refusal of this exact request.</summary>
+    public static Attempt Classify(int status, string? detail)
     {
-        switch (item)
+        if (status >= 200 && status < 300)
+            return new Attempt(Outcome.Accepted, null);
+        if (status >= 500 || status == 408 || status == 429)
+            return new Attempt(Outcome.Temporary, $"HTTP {status}: {detail}");
+        return new Attempt(Outcome.Permanent, $"HTTP {status}: {detail}");
+    }
+
+    // ------------------------------------------------------------------ completing rows that wait for data
+
+    private sealed record Completion(string? Payload, bool Permanent, string? Error);
+
+    private static Completion Done(string payload) => new(payload, false, null);
+    private static Completion Wait(string error) => new(null, false, error);
+    private static Completion Fail(string error) => new(null, true, error);
+
+    private async Task<Completion> CompleteAsync(IServiceProvider services, NotificationOutboxItem item, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(item.ContextJson))
+            return Fail("CONTEXT_MISSING");
+
+        switch (item.Kind)
         {
-            case BidOutbidWorkItem outbid:
-                await PostWithRetryAsync(
-                    OutbidPath, BuildOutbid(outbid.Notification), "bid outbid", outbid.Notification.AuctionId, cancellationToken);
-                break;
-
-            case AuctionWinnerWorkItem winner:
+            case NotificationPayloads.Winner:
             {
-                var contact = await ResolveWinnerContactAsync(winner.Notification.WinnerUserId, cancellationToken);
-                if (contact is null)
-                {
-                    _logger.LogWarning(
-                        "The winner notification of auction {AuctionId} was skipped: the email of user {UserId} is not available.",
-                        winner.Notification.AuctionId, winner.Notification.WinnerUserId);
-                    return;
-                }
+                var notice = JsonSerializer.Deserialize<AuctionWinnerNotification>(item.ContextJson, NotificationPayloads.Json);
+                if (notice is null)
+                    return Fail("CONTEXT_INVALID");
 
-                await PostWithRetryAsync(
-                    WinnerPath, BuildWinner(winner.Notification, contact), "auction winner", winner.Notification.AuctionId, cancellationToken);
-                break;
+                var contact = await ResolveWinnerContactAsync(notice.WinnerUserId, cancellationToken);
+                return contact is null
+                    ? Wait("WINNER_EMAIL_UNAVAILABLE")
+                    : Done(JsonSerializer.Serialize(NotificationPayloads.BuildWinner(notice, contact.Email, contact.FullName), NotificationPayloads.Json));
             }
 
-            case AuctionFailedWorkItem failed:
-                await PostWithRetryAsync(
-                    FailedPath, BuildFailed(failed.Notification), "auction failed", failed.Notification.AuctionId, cancellationToken);
-                break;
+            case NotificationPayloads.OrderPaid:
+            {
+                var notice = JsonSerializer.Deserialize<AuctionOrderPaidNotification>(item.ContextJson, NotificationPayloads.Json);
+                return notice is null ? Fail("CONTEXT_INVALID") : await CompleteOrderPaidAsync(services, notice, cancellationToken);
+            }
 
-            case AuctionCancelledWorkItem cancelled:
-                await PostWithRetryAsync(
-                    CancelledPath, BuildCancelled(cancelled.Notification), "auction cancelled", cancelled.Notification.AuctionId, cancellationToken);
-                break;
-
-            case ReplacementWinnerOfferWorkItem offer:
-                await PostWithRetryAsync(
-                    ReplacementWinnerOfferPath, BuildReplacementWinnerOffer(offer.Notification),
-                    "replacement winner offer", offer.Notification.AuctionId, cancellationToken);
-                break;
+            default:
+                return Fail("UNKNOWN_KIND_" + item.Kind);
         }
     }
 
-    // ------------------------------------------------------------------ Request bodies
-
-    private static object BuildOutbid(BidOutbidNotification n) => new
+    private async Task<Completion> CompleteOrderPaidAsync(IServiceProvider services, AuctionOrderPaidNotification notice, CancellationToken cancellationToken)
     {
-        sourceEventId = DeterministicGuid($"auction-outbid:{n.TriggerBidId:N}"),
-        auctionId = n.AuctionId,
-        triggerBidId = n.TriggerBidId,
-        previousBidId = n.PreviousBidId,
-        previousHighestBidderUserId = n.PreviousHighestBidderUserId,
-        newHighestBidderUserId = n.NewHighestBidderUserId,
-        sellerUserId = n.SellerUserId,
-        auctionTitle = CleanTitle(n.AuctionTitle),
-        previousAmount = n.PreviousAmount,
-        newAmount = n.NewAmount,
-        currency = "VND",
-        occurredAt = n.OccurredAt,
-        auctionEndsAt = n.AuctionEndsAt,
-        traceId = Clip(n.TraceId, 100)
-    };
+        var orderNo = notice.OrderNo;
+        var total = notice.TotalAmount;
+        var deadline = notice.SellerAcceptDeadline;
+        var paidAt = notice.PaidAt;
 
-    private static object BuildWinner(AuctionWinnerNotification n, WinnerContact contact) => new
-    {
-        sourceEventId = DeterministicGuid($"auction-winner:{n.AuctionId:N}:{n.ResultId:N}"),
-        auctionId = n.AuctionId,
-        resultId = n.ResultId,
-        winningBidId = n.WinningBidId,
-        winnerUserId = n.WinnerUserId,
-        sellerUserId = n.SellerUserId,
-        winnerEmail = contact.Email,
-        winnerFullName = Clip(contact.FullName, 200),
-        auctionTitle = CleanTitle(n.AuctionTitle),
-        winningAmount = n.WinningAmount,
-        currency = "VND",
-        settledAt = n.SettledAt,
-        paymentDeadline = n.PaymentDeadline
-    };
-
-    private static object BuildFailed(AuctionFailedNotification n) => new
-    {
-        sourceEventId = DeterministicGuid($"auction-failed:{n.AuctionId:N}:{n.FailedAt:O}"),
-        auctionId = n.AuctionId,
-        sellerUserId = n.SellerUserId,
-        auctionTitle = CleanTitle(n.AuctionTitle),
-        reason = Clip(n.Reason, 1000),
-        failedAt = n.FailedAt,
-        traceId = Clip(n.TraceId, 100)
-    };
-
-    private static object BuildCancelled(AuctionCancelledNotification n) => new
-    {
-        sourceEventId = DeterministicGuid($"auction-cancelled:{n.AuctionId:N}:{n.CancelledAt:O}"),
-        auctionId = n.AuctionId,
-        sellerUserId = n.SellerUserId,
-        auctionTitle = CleanTitle(n.AuctionTitle),
-        reason = Clip(n.Reason, 1000),
-        cancelledAt = n.CancelledAt,
-        forced = n.Forced,
-        traceId = Clip(n.TraceId, 100)
-    };
-
-    private static object BuildReplacementWinnerOffer(ReplacementWinnerOfferNotification n) => new
-    {
-        sourceEventId = DeterministicGuid($"auction-winner-offer:{n.OfferId:N}"),
-        auctionId = n.AuctionId,
-        offerId = n.OfferId,
-        bidId = n.BidId,
-        bidderUserId = n.BidderUserId,
-        previousWinnerUserId = n.PreviousWinnerUserId,
-        sellerUserId = n.SellerUserId,
-        auctionTitle = CleanTitle(n.AuctionTitle),
-        amount = n.Amount,
-        currency = "VND",
-        offeredAt = n.OfferedAt,
-        expiresAt = n.ExpiresAt,
-        traceId = Clip(n.TraceId, 100)
-    };
-
-    // ------------------------------------------------------------------ HTTP
-
-    /// <summary>Gửi một request JSON, thử lại khi lỗi tạm thời. Không bao giờ ném lỗi nghiệp vụ ra ngoài (chỉ ghi log); chỉ ném khi service đang tắt.</summary>
-    private async Task PostWithRetryAsync(string path, object body, string kind, Guid auctionId, CancellationToken cancellationToken)
-    {
-        var http = _httpFactory.CreateClient(NotificationHttpClient);
-        var json = JsonSerializer.Serialize(body, JsonOptions);
-
-        for (var attempt = 1; attempt <= NotificationOptions.MaxAttempts; attempt++)
+        // Callbacks that predate the extra fields (or a Commerce that was not upgraded) did not carry the order data: ask Commerce.
+        if (string.IsNullOrWhiteSpace(orderNo) || total is null || total <= 0m || deadline is null)
         {
             try
             {
-                using var content = new StringContent(json, Encoding.UTF8, "application/json");
-                using var response = await http.PostAsync(path, content, cancellationToken);
+                var commerce = services.GetRequiredService<ICommerceClient>();
+                var snapshot = await commerce.GetOrderNotificationSnapshotAsync(notice.OrderId, cancellationToken);
+                if (snapshot is null)
+                    return Fail("ORDER_SNAPSHOT_UNAVAILABLE");
+                if (snapshot.BuyerId != notice.BuyerUserId || snapshot.SellerId != notice.SellerUserId)
+                    return Fail("ORDER_SNAPSHOT_MISMATCH");
+                if (string.Equals(snapshot.Status, "PendingPayment", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(snapshot.Status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+                    return Fail("ORDER_SNAPSHOT_MISMATCH");
 
-                if (response.IsSuccessStatusCode)
-                {
-                    _logger.LogInformation("The {Kind} notification of auction {AuctionId} was accepted by the Notification service.", kind, auctionId);
-                    return;
-                }
-
-                var status = (int)response.StatusCode;
-                var detail = await ReadSnippetAsync(response, cancellationToken);
-                var temporary = status >= 500 || status == 408 || status == 429;
-                if (!temporary)
-                {
-                    _logger.LogWarning(
-                        "The Notification service rejected the {Kind} notification of auction {AuctionId} (HTTP {Status}): {Detail}",
-                        kind, auctionId, status, detail);
-                    return;
-                }
-
-                _logger.LogWarning(
-                    "The Notification service answered HTTP {Status} to the {Kind} notification of auction {AuctionId} (attempt {Attempt}): {Detail}",
-                    status, kind, auctionId, attempt, detail);
+                orderNo = snapshot.OrderNo;
+                total = snapshot.TotalAmount;
+                deadline = snapshot.SellerRespondDeadlineAt;
+                paidAt = snapshot.PaidAt;
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            catch (DomainException ex) when (ex.StatusCode == 503)
             {
-                throw;
+                return Wait("ORDER_SNAPSHOT_TEMPORARILY_UNAVAILABLE");
             }
-            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
-            {
-                _logger.LogWarning(
-                    "The {Kind} notification of auction {AuctionId} could not be sent (attempt {Attempt}): {Message}",
-                    kind, auctionId, attempt, ex.Message);
-            }
-
-            if (attempt < NotificationOptions.MaxAttempts)
-                await Task.Delay(TimeSpan.FromSeconds(attempt * 2), cancellationToken);
         }
 
-        _logger.LogError(
-            "The {Kind} notification of auction {AuctionId} was dropped after {Attempts} attempts.",
-            kind, auctionId, NotificationOptions.MaxAttempts);
+        var shop = await ResolveShopAsync(notice.SellerUserId, cancellationToken);
+        if (shop.Temporary)
+            return Wait("SHOP_LOOKUP_TEMPORARILY_UNAVAILABLE");
+        if (shop.ShopId is null)
+            return Fail("SHOP_ID_UNRESOLVED");
+
+        var complete = notice with { PaidAt = paidAt };
+        return Done(JsonSerializer.Serialize(
+            NotificationPayloads.BuildOrderPaid(complete, shop.ShopId.Value, orderNo!.Trim(), total!.Value, deadline!.Value), NotificationPayloads.Json));
     }
 
-    /// <summary>Lấy email và tên người thắng. Có DevWinnerEmail thì dùng luôn; không thì hỏi User service. Không lấy được thì trả null.</summary>
+    private sealed record ShopLookup(Guid? ShopId, bool Temporary);
+
+    /// <summary>The shop id is the seller profile id, not the seller's user id: the two are different values.</summary>
+    private async Task<ShopLookup> ResolveShopAsync(Guid sellerUserId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var http = _httpFactory.CreateClient(UserHttpClient);
+            using var response = await http.GetAsync($"/api/v1/internal/users/{sellerUserId}/shop", cancellationToken);
+            if (response.StatusCode == HttpStatusCode.NotFound)
+                return new ShopLookup(null, false);
+            if (!response.IsSuccessStatusCode)
+                return new ShopLookup(null, true);
+
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object)
+                root = data;
+
+            return root.TryGetProperty("shopId", out var shopId) && shopId.ValueKind == JsonValueKind.String
+                && Guid.TryParse(shopId.GetString(), out var parsed) && parsed != Guid.Empty
+                    ? new ShopLookup(parsed, false)
+                    : new ShopLookup(null, false);
+        }
+        catch (Exception ex) when ((ex is HttpRequestException || ex is TaskCanceledException || ex is JsonException) && !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning("Could not get the shop of seller {UserId}: {Message}", sellerUserId, ex.Message);
+            return new ShopLookup(null, true);
+        }
+    }
+
+    private sealed record WinnerContact(string Email, string? FullName);
+
+    /// <summary>The winner's mail address: the test address when set, otherwise the User service. Null when it cannot be had (yet).</summary>
     private async Task<WinnerContact?> ResolveWinnerContactAsync(Guid userId, CancellationToken cancellationToken)
     {
         if (_options.DevWinnerEmail is not null)
@@ -275,7 +382,7 @@ public sealed class NotificationDispatcher : BackgroundService
         try
         {
             var http = _httpFactory.CreateClient(UserHttpClient);
-            using var content = new StringContent(JsonSerializer.Serialize(new { userId }, JsonOptions), Encoding.UTF8, "application/json");
+            using var content = new StringContent(JsonSerializer.Serialize(new { userId }, NotificationPayloads.Json), Encoding.UTF8, "application/json");
             using var response = await http.PostAsync(UserContactPath, content, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
@@ -285,37 +392,23 @@ public sealed class NotificationDispatcher : BackgroundService
 
             using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
             var root = document.RootElement;
-            if (root.ValueKind == JsonValueKind.Object
-                && root.TryGetProperty("data", out var data)
-                && data.ValueKind == JsonValueKind.Object)
-            {
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object)
                 root = data;
-            }
 
             var email = ReadString(root, "email");
             return string.IsNullOrWhiteSpace(email) ? null : new WinnerContact(email.Trim(), ReadString(root, "fullName"));
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
+        catch (Exception ex) when ((ex is HttpRequestException || ex is TaskCanceledException || ex is JsonException) && !cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning("Could not get the contact of user {UserId}: {Message}", userId, ex.Message);
             return null;
         }
     }
 
-    // ------------------------------------------------------------------ Helpers
-
-    private sealed record WinnerContact(string Email, string? FullName);
-
     private static string? ReadString(JsonElement element, string name) =>
-        element.ValueKind == JsonValueKind.Object
-            && element.TryGetProperty(name, out var value)
-            && value.ValueKind == JsonValueKind.String
-                ? value.GetString()
-                : null;
+        element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
 
     private static async Task<string> ReadSnippetAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
@@ -324,31 +417,9 @@ public sealed class NotificationDispatcher : BackgroundService
             var text = await response.Content.ReadAsStringAsync(cancellationToken);
             return text.Length <= 300 ? text : text[..300];
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        catch (Exception ex) when (ex is HttpRequestException || ex is TaskCanceledException)
         {
             return string.Empty;
         }
-    }
-
-    /// <summary>Mã sự kiện cố định sinh từ một chuỗi, để gửi lại cùng thông báo luôn có cùng sourceEventId.</summary>
-    private static Guid DeterministicGuid(string name) => new(MD5.HashData(Encoding.UTF8.GetBytes(name)));
-
-    /// <summary>Tiêu đề phiên theo yêu cầu của Notification: không rỗng, không có ký tự điều khiển, tối đa 200 ký tự.</summary>
-    private static string CleanTitle(string? title)
-    {
-        var cleaned = new string((title ?? string.Empty).Where(c => !char.IsControl(c)).ToArray()).Trim();
-        if (cleaned.Length == 0)
-            return "Auction";
-
-        return cleaned.Length <= 200 ? cleaned : cleaned[..200];
-    }
-
-    private static string? Clip(string? value, int maxLength)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-            return null;
-
-        var trimmed = value.Trim();
-        return trimmed.Length <= maxLength ? trimmed : trimmed[..maxLength];
     }
 }

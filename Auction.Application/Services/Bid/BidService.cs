@@ -327,6 +327,14 @@ public sealed class BidService : IBidService
             ipAddress: actor.ClientIp,
             traceId: actor.TraceId);
 
+        // Queue outbox notification before SaveChanges so it commits atomically with the bid.
+        if (outbidBid is not null && outbidBid.BidderId != actor.UserId)
+        {
+            _notifications.NotifyBidOutbid(new BidOutbidNotification(
+                auctionId, auction.SnapshotProductTitle, bid.Id, outbidBid.BidId, outbidBid.BidderId,
+                actor.UserId, auction.SellerId, outbidBid.Amount, amount, now, state.ScheduledEndAt, actor.TraceId));
+        }
+
         try
         {
             await _dbContext.SaveChangesAsync(cancellationToken);
@@ -346,15 +354,6 @@ public sealed class BidService : IBidService
                 state.BidCount, now, state.ScheduledEndAt, state.ExtensionCount,
                 previousPriceAmount, state.RowVersion),
             CancellationToken.None);
-
-        // Báo cho người vừa bị vượt giá qua Notification service (gửi nền, không chờ, lỗi chỉ ghi log).
-        // Lượt đầu tiên không có ai bị vượt, và người dẫn đầu tự nâng giá của mình thì không cần báo.
-        if (outbidBid is not null && outbidBid.BidderId != actor.UserId)
-        {
-            _notifications.NotifyBidOutbid(new BidOutbidNotification(
-                auctionId, auction.SnapshotProductTitle, bid.Id, outbidBid.BidId, outbidBid.BidderId,
-                actor.UserId, auction.SellerId, outbidBid.Amount, amount, now, state.ScheduledEndAt, actor.TraceId));
-        }
 
         return response;
     }

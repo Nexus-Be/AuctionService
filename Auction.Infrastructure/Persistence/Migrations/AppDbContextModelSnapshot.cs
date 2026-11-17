@@ -1243,6 +1243,75 @@ namespace Auction.Infrastructure.Persistence.Migrations
                     b.ToTable("IdempotencyKeys");
                 });
 
+            modelBuilder.Entity("Auction.Domain.Entities.NotificationOutboxItem", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("AttemptCount")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("AuctionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ContextJson")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("EventId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("GiveUpAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(60)
+                        .HasColumnType("character varying(60)");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<DateTimeOffset?>("LockedUntil")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("NextRetryAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PayloadJson")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset?>("SentAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AuctionId");
+
+                    b.HasIndex("EventId")
+                        .IsUnique();
+
+                    b.HasIndex("Status", "NextRetryAt");
+
+                    b.ToTable("NotificationOutbox", (string)null);
+                });
+
             modelBuilder.Entity("Auction.Domain.Entities.ProductOpenAuction", b =>
                 {
                     b.Property<Guid>("Id")

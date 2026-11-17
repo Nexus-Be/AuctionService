@@ -1,21 +1,28 @@
 namespace Auction.Infrastructure.Notifications;
 
 using System;
-using System.Threading.Channels;
+using System.Linq;
+using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Auction.Application.Interfaces;
+using Auction.Domain.Entities;
+using Auction.Domain.Enums;
 
 /// <summary>
-/// Cấu hình gửi thông báo sang Notification service.
-/// Enabled (Notification:Enabled, mặc định tắt), BaseUrl (Notification:BaseUrl, mặc định http://localhost:8007),
-/// ServiceUserId (Notification:ServiceUserId) là mã gửi trong header x-user-id vì Notification yêu cầu header này cùng role "service",
-/// DevWinnerEmail (Notification:DevWinnerEmail) chỉ để test: có giá trị thì mọi email người thắng gửi tới địa chỉ này và bỏ qua việc tra User service.
+/// Settings for the notifications sent to the Notification service through the Gateway.
+/// Enabled (Notification:Enabled, off by default); BaseUrl (Notification:BaseUrl): the Gateway, not Notification itself;
+/// ServiceUserId (Notification:ServiceUserId): the subject of the service token; SigningKey (AUCTION_NOTIFICATION_SIGNING_KEY or
+/// Notification:SigningKey): the secret shared with the Gateway and Notification, at least 32 bytes, never logged;
+/// DevWinnerEmail (Notification:DevWinnerEmail): test only, every winner mail goes to this address and the user lookup is skipped.
 /// </summary>
-public sealed record NotificationOptions(bool Enabled, string BaseUrl, Guid ServiceUserId, string? DevWinnerEmail)
+public sealed record NotificationOptions(bool Enabled, string BaseUrl, Guid ServiceUserId, string? DevWinnerEmail, string? SigningKey = null)
 {
-    /// <summary>Số lần thử tối đa cho mỗi thông báo khi Notification lỗi tạm thời (5xx, hết giờ chờ, mất kết nối).</summary>
-    public const int MaxAttempts = 3;
+    /// <summary>How long a notification may keep failing or waiting for data before it needs a person.</summary>
+    public static readonly TimeSpan GiveUpAfter = TimeSpan.FromHours(24);
+
+    /// <summary>Longest wait between two attempts.</summary>
+    public static readonly TimeSpan MaxBackoff = TimeSpan.FromMinutes(15);
 
     public static readonly Guid DefaultServiceUserId = new("00000000-0000-0000-0000-0000000000a1");
 
@@ -27,82 +34,96 @@ public sealed record NotificationOptions(bool Enabled, string BaseUrl, Guid Serv
             ? parsedId
             : DefaultServiceUserId;
         var devEmail = configuration["Notification:DevWinnerEmail"];
+        var key = Environment.GetEnvironmentVariable("AUCTION_NOTIFICATION_SIGNING_KEY") ?? configuration["Notification:SigningKey"];
 
         return new NotificationOptions(
             enabled,
-            string.IsNullOrWhiteSpace(baseUrl) ? "http://localhost:8007" : baseUrl.Trim(),
+            string.IsNullOrWhiteSpace(baseUrl) ? "http://localhost:8080" : baseUrl.Trim(),
             serviceUser,
-            string.IsNullOrWhiteSpace(devEmail) ? null : devEmail.Trim());
+            string.IsNullOrWhiteSpace(devEmail) ? null : devEmail.Trim(),
+            string.IsNullOrWhiteSpace(key) ? null : key);
+    }
+
+    /// <summary>Delay before the next attempt: 15 s, 30 s, 1 min, 2 min ... capped at <see cref="MaxBackoff"/>.</summary>
+    public static TimeSpan Backoff(int attempt)
+    {
+        var seconds = 15d * Math.Pow(2, Math.Max(0, attempt - 1));
+        var delay = TimeSpan.FromSeconds(Math.Min(seconds, MaxBackoff.TotalSeconds));
+        return delay;
     }
 }
 
-/// <summary>Một thông báo đang chờ gửi trong hàng đợi.</summary>
-public abstract record NotificationWorkItem;
-
-public sealed record BidOutbidWorkItem(BidOutbidNotification Notification) : NotificationWorkItem;
-
-public sealed record AuctionWinnerWorkItem(AuctionWinnerNotification Notification) : NotificationWorkItem;
-
-public sealed record AuctionFailedWorkItem(AuctionFailedNotification Notification) : NotificationWorkItem;
-
-public sealed record AuctionCancelledWorkItem(AuctionCancelledNotification Notification) : NotificationWorkItem;
-
-public sealed record ReplacementWinnerOfferWorkItem(ReplacementWinnerOfferNotification Notification) : NotificationWorkItem;
-
 /// <summary>
-/// Hàng đợi trong bộ nhớ cho thông báo gửi sang Notification service. Hàm Notify* trả về ngay và không bao giờ ném lỗi.
-/// Tắt (Notification:Enabled=false) thì bỏ qua thông báo. Hàng đợi đầy thì bỏ thông báo mới và ghi log.
-/// Vì không có outbox, thông báo còn trong hàng đợi sẽ mất nếu service khởi động lại.
+/// Writes notifications to the outbox of the current unit of work (see <see cref="INotificationClient"/>). It never saves and never calls the
+/// network: the row is committed together with the business change that caused it, and <see cref="NotificationDispatcher"/> sends it.
+/// Scoped, so it shares the DbContext of the service that calls it.
 /// </summary>
 public sealed class NotificationClient : INotificationClient
 {
-    private const int Capacity = 1000;
-
-    private readonly Channel<NotificationWorkItem> _queue = Channel.CreateBounded<NotificationWorkItem>(
-        new BoundedChannelOptions(Capacity) { SingleReader = true });
+    private readonly IAuctionDbContext _db;
     private readonly NotificationOptions _options;
     private readonly ILogger<NotificationClient> _logger;
 
-    public NotificationClient(NotificationOptions options, ILogger<NotificationClient> logger)
+    public NotificationClient(IAuctionDbContext db, NotificationOptions options, ILogger<NotificationClient> logger)
     {
+        _db = db;
         _options = options;
         _logger = logger;
     }
 
-    /// <summary>Phía đọc của hàng đợi, chỉ dùng cho NotificationDispatcher.</summary>
-    public ChannelReader<NotificationWorkItem> Reader => _queue.Reader;
-
     public void NotifyBidOutbid(BidOutbidNotification notification) =>
-        Enqueue(new BidOutbidWorkItem(notification), "bid outbid", notification.AuctionId);
+        Add(NotificationPayloads.Outbid, notification.AuctionId, NotificationPayloads.OutbidId(notification),
+            NotificationPayloads.BuildOutbid(notification), context: null);
 
     public void NotifyAuctionWinner(AuctionWinnerNotification notification) =>
-        Enqueue(new AuctionWinnerWorkItem(notification), "auction winner", notification.AuctionId);
+        // The mail address is not known here: the worker fetches it from the User service, then freezes the payload.
+        Add(NotificationPayloads.Winner, notification.AuctionId, NotificationPayloads.WinnerId(notification),
+            payload: null, context: notification);
 
     public void NotifyAuctionFailed(AuctionFailedNotification notification) =>
-        Enqueue(new AuctionFailedWorkItem(notification), "auction failed", notification.AuctionId);
+        Add(NotificationPayloads.Failed, notification.AuctionId, NotificationPayloads.FailedId(notification),
+            NotificationPayloads.BuildFailed(notification), context: null);
 
     public void NotifyAuctionCancelled(AuctionCancelledNotification notification) =>
-        Enqueue(new AuctionCancelledWorkItem(notification), "auction cancelled", notification.AuctionId);
+        Add(NotificationPayloads.Cancelled, notification.AuctionId, NotificationPayloads.CancelledId(notification),
+            NotificationPayloads.BuildCancelled(notification), context: null);
 
     public void NotifyReplacementWinnerOffer(ReplacementWinnerOfferNotification notification) =>
-        Enqueue(new ReplacementWinnerOfferWorkItem(notification), "replacement winner offer", notification.AuctionId);
+        Add(NotificationPayloads.WinnerOffer, notification.AuctionId, NotificationPayloads.OfferId(notification),
+            NotificationPayloads.BuildReplacementWinnerOffer(notification), context: null);
 
-    private void Enqueue(NotificationWorkItem item, string kind, Guid auctionId)
+    public void NotifyAuctionOrderPaid(AuctionOrderPaidNotification notification) =>
+        // The shop id (User service) and, for callbacks that did not carry them, the order number, total and seller deadline (Commerce)
+        // are fetched by the worker first; only a complete payload is ever frozen and sent.
+        Add(NotificationPayloads.OrderPaid, notification.AuctionId, NotificationPayloads.OrderPaidId(notification),
+            payload: null, context: notification);
+
+    private void Add(string kind, Guid auctionId, Guid eventId, object? payload, object? context)
     {
         if (!_options.Enabled)
         {
-            _logger.LogDebug("Notifications are disabled: the {Kind} notification of auction {AuctionId} was skipped.", kind, auctionId);
+            _logger.LogDebug("Notifications are disabled: the {Kind} notification of auction {AuctionId} was not queued.", kind, auctionId);
             return;
         }
 
-        try
+        // The same event queued twice in one unit of work is one event.
+        if (_db.NotificationOutbox.Local.Any(x => x.EventId == eventId))
+            return;
+
+        var now = DateTimeOffset.UtcNow;
+        _db.NotificationOutbox.Add(new NotificationOutboxItem
         {
-            if (!_queue.Writer.TryWrite(item))
-                _logger.LogWarning("The notification queue is full: the {Kind} notification of auction {AuctionId} was dropped.", kind, auctionId);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Could not queue the {Kind} notification of auction {AuctionId}.", kind, auctionId);
-        }
+            Id = Guid.NewGuid(),
+            EventId = eventId,
+            Kind = kind,
+            AuctionId = auctionId,
+            PayloadJson = payload is null ? null : JsonSerializer.Serialize(payload, NotificationPayloads.Json),
+            ContextJson = context is null ? null : JsonSerializer.Serialize(context, NotificationPayloads.Json),
+            Status = payload is null ? NotificationOutboxStatus.AwaitingData : NotificationOutboxStatus.Pending,
+            NextRetryAt = now,
+            GiveUpAt = now.Add(NotificationOptions.GiveUpAfter),
+            CreatedAt = now,
+            UpdatedAt = now
+        });
     }
 }

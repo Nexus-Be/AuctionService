@@ -130,19 +130,16 @@ builder.Services.AddSingleton<CommerceSyncQueue>();
 builder.Services.AddSingleton<ICommerceSync>(sp => sp.GetRequiredService<CommerceSyncQueue>());
 builder.Services.AddHostedService<CommerceSyncWorker>();
 
-// Thông báo sang Notification service: hàng đợi trong bộ nhớ, gửi nền, lỗi chỉ ghi log. Mặc định tắt (Notification:Enabled).
-// Notification yêu cầu header x-user-id (GUID bất kỳ) và x-user-roles chứa "service" hoặc "admin".
+// Notifications for the Notification service. Each one is written to the notification outbox in the same SaveChanges as the business change
+// (NotificationClient is scoped and shares the DbContext of the caller); NotificationDispatcher sends the rows afterwards. Off by default (Notification:Enabled).
+// The requests go to the Gateway (Notification:BaseUrl) with a signed service token; no x-user-* identity header is sent.
 var notificationOptions = NotificationOptions.FromConfiguration(builder.Configuration);
 builder.Services.AddSingleton(notificationOptions);
-builder.Services.AddSingleton<NotificationClient>();
-builder.Services.AddSingleton<INotificationClient>(sp => sp.GetRequiredService<NotificationClient>());
+builder.Services.AddScoped<INotificationClient, NotificationClient>();
 builder.Services.AddHttpClient(NotificationDispatcher.NotificationHttpClient, client =>
 {
     client.BaseAddress = new Uri(notificationOptions.BaseUrl);
     client.Timeout = TimeSpan.FromSeconds(10);
-    client.DefaultRequestHeaders.Add("x-user-id", notificationOptions.ServiceUserId.ToString());
-    client.DefaultRequestHeaders.Add("x-user-roles", "service");
-    client.DefaultRequestHeaders.Add("X-Caller-Service", "auction-service");
 });
 builder.Services.AddHttpClient(NotificationDispatcher.UserHttpClient, client =>
 {

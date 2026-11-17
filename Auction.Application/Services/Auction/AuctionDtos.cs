@@ -214,3 +214,39 @@ public sealed record AuctionSagaStateData(
 
 /// <summary>Một bước của saga. State là Completed, InProgress, Pending, Skipped hoặc Failed; At là thời điểm bước đó xảy ra (nếu đã xảy ra).</summary>
 public sealed record AuctionSagaStepDto(string Name, string State, DateTimeOffset? At, string? Detail);
+
+public sealed record MyParticipatedAuctionDto(
+    Guid AuctionId,
+    Guid ProductId,
+    Guid? SkuId,
+    Guid SellerId,
+    string? ProductName,
+    string? PrimaryImageUrl,
+    AuctionStatus Status,
+    decimal StartPriceAmount,
+    decimal? CurrentPriceAmount,
+    decimal? MyHighestBidAmount,
+    bool IsWinning,
+    string ParticipationState,
+    DepositStatus? MyDepositStatus,
+    Guid? OrderId,
+    int BidCount,
+    DateTimeOffset ScheduledStartAt,
+    DateTimeOffset ScheduledEndAt);
+
+public sealed record AdminAuctionSummaryDto(
+    Guid AuctionId,
+    Guid ProductId,
+    Guid? SkuId,
+    Guid SellerId,
+    string? ProductName,
+    AuctionStatus Status,
+    decimal StartPriceAmount,
+    decimal? CurrentPriceAmount,
+    int BidCount,
+    DateTimeOffset ScheduledStartAt,
+    DateTimeOffset ScheduledEndAt,
+    bool HasAttentionDeposit,
+    bool HasOverdueSettlement,
+    bool NeedsAttention,
+    DateTimeOffset CreatedAt);

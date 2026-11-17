@@ -21,6 +21,22 @@ public class DepositsController : ControllerBase
         _depositService = depositService;
     }
 
+    /// <summary>Buyer views all of their own deposits across auctions with pagination and optional status filter.</summary>
+    [HttpGet("~/api/v1/me/deposits")]
+    [ProducesResponseType(typeof(PagedData<MyDepositListItemDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListMyDeposits(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        [FromQuery] string? status = null,
+        CancellationToken ct = default)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!CanUseDeposits()) return RoleNotAllowed();
+
+        var result = await _depositService.ListMyDepositsAsync(CreateActor(userId), page, pageSize, status, ct);
+        return Ok(result);
+    }
+
     /// <summary>Buyer sees the deposit amount, rate, forfeiture policy and current deposit for an auction before paying.</summary>
     [HttpGet("~/api/v1/auctions/{auctionId:guid}/deposit-requirement")]
     [ProducesResponseType(typeof(DepositRequirementResponse), StatusCodes.Status200OK)]
@@ -73,6 +89,18 @@ public class DepositsController : ControllerBase
 
         var result = await _depositService.GetAdminAuctionDepositsAsync(
             CreateActor(userId), auctionId, status, page, pageSize, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Admin or Staff manually triggers deposit reconciliation and retries for an auction.</summary>
+    [HttpPost("~/api/v1/admin/auctions/{auctionId:guid}/deposits/reconcile")]
+    [ProducesResponseType(typeof(AdminDepositReconcileResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ReconcileAuctionDeposits([FromRoute] Guid auctionId, CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!CanAdminReviewDeposits()) return AdminOrStaffRoleRequired();
+
+        var result = await _depositService.ReconcileAuctionDepositsAsync(CreateActor(userId), auctionId, ct);
         return Ok(result);
     }
 

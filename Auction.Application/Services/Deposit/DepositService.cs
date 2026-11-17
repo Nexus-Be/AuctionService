@@ -751,6 +751,61 @@ public sealed class DepositService : IDepositService
 
     // ------------------------------------------------------------------ 03: my deposit in auction
 
+    /// <summary>Buyer xem danh sách & lịch sử tất cả các khoản cọc của chính mình trên toàn sàn.</summary>
+    public async Task<PagedData<MyDepositListItemDto>> ListMyDepositsAsync(
+        ActorContext actor, int page = 1, int pageSize = 20, string? status = null, CancellationToken cancellationToken = default)
+    {
+        var (safePage, safePageSize) = PaginationConstants.Normalize(page, pageSize);
+
+        DepositStatus? statusFilter = null;
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            var trimmed = status.Trim();
+            if (int.TryParse(trimmed, out _)
+                || !Enum.TryParse<DepositStatus>(trimmed, ignoreCase: true, out var parsed)
+                || !Enum.IsDefined(parsed))
+            {
+                throw new DomainException(
+                    "VAL_INVALID_STATUS",
+                    "Deposit status must be one of Pending, Authorized, Released, Captured, Failed or Expired.",
+                    400);
+            }
+            statusFilter = parsed;
+        }
+
+        var query = _dbContext.AuctionDeposits
+            .AsNoTracking()
+            .Where(d => d.BidderId == actor.UserId && !d.IsDeleted);
+
+        if (statusFilter is { } filter)
+            query = query.Where(d => d.Status == filter);
+
+        var totalCount = await query.CountAsync(cancellationToken);
+
+        var items = await query
+            .OrderByDescending(d => d.CreatedAt)
+            .ThenBy(d => d.Id)
+            .Skip((safePage - 1) * safePageSize)
+            .Take(safePageSize)
+            .Select(d => new MyDepositListItemDto(
+                d.Id,
+                d.AuctionId,
+                d.Auction != null ? (d.Auction.SnapshotProductTitle ?? "Auction") : "Auction",
+                d.Auction != null && d.Auction.AuctionState != null ? d.Auction.AuctionState.Status : null,
+                d.Amount,
+                d.RatePercent,
+                d.Status,
+                d.CapturePurpose,
+                d.PolicyVersion,
+                d.AuthorizedAt,
+                d.ReleasedAt,
+                d.CapturedAt,
+                d.CreatedAt))
+            .ToListAsync(cancellationToken);
+
+        return new PagedData<MyDepositListItemDto>(items, PaginationMetadata.Create(safePage, safePageSize, totalCount));
+    }
+
     /// <summary>
     /// Cho Buyer biết trạng thái cọc của chính mình trong phiên và có được đặt giá hay không (API 03, Hướng C).
     /// Chưa có cọc trả về status = "NotCreated", canBid = false, blockReason = "DEPOSIT_REQUIRED" (200 OK).
@@ -858,6 +913,57 @@ public sealed class DepositService : IDepositService
     /// 1) Thực hiện lại các việc nền trên cọc (Release, Capture, Refund) đang Pending có NextRetryAt &lt;= now và NeedsAttention = false.
     /// 2) Đồng bộ các cọc bị treo ở trạng thái Pending (do timeout lúc gọi W1 ở API 02) qua W4 by-reference; quá 10 phút không có hold thì chuyển Failed.
     /// </summary>
+    public async Task<AdminDepositReconcileResponse> ReconcileAuctionDepositsAsync(
+        ActorContext actor, Guid auctionId, CancellationToken cancellationToken = default)
+    {
+        if (auctionId == Guid.Empty)
+            throw new DomainException("VAL_INVALID_IDENTIFIER", "Auction ID is required.", 400);
+
+        var auctionExists = await _dbContext.Auctions
+            .AsNoTracking()
+            .AnyAsync(a => a.Id == auctionId && !a.IsDeleted, cancellationToken);
+        if (!auctionExists)
+            throw new EntityNotFoundException("AUCTION_NOT_FOUND", "Auction", auctionId);
+
+        var now = _clock.GetUtcNow();
+        var stuckDeposits = await _dbContext.AuctionDeposits
+            .Where(d => d.AuctionId == auctionId
+                        && !d.IsDeleted
+                        && (d.PendingAction != DepositPendingAction.None || d.ReleasePending || d.NeedsAttention))
+            .ToListAsync(cancellationToken);
+
+        foreach (var deposit in stuckDeposits)
+        {
+            deposit.NeedsAttention = false;
+            deposit.ActionFailureCount = 0;
+            deposit.NextRetryAt = now;
+            deposit.LastError = null;
+            deposit.UpdatedAt = now;
+            deposit.RowVersion += 1;
+        }
+
+        if (stuckDeposits.Count > 0)
+        {
+            _dbContext.AddAuditLog(
+                AuditAction.DepositReconcile, "Auction", auctionId.ToString(),
+                oldValues: null,
+                newValues: new { queuedDeposits = stuckDeposits.Count },
+                userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        await ProcessDueDepositRetriesAsync(50, cancellationToken);
+
+        var remaining = await _dbContext.AuctionDeposits
+            .AsNoTracking()
+            .CountAsync(d => d.AuctionId == auctionId
+                             && !d.IsDeleted
+                             && (d.PendingAction != DepositPendingAction.None || d.ReleasePending || d.NeedsAttention),
+                cancellationToken);
+
+        return new AdminDepositReconcileResponse(auctionId, stuckDeposits.Count, remaining, now);
+    }
+
     public async Task ProcessDueDepositRetriesAsync(int limit, CancellationToken cancellationToken = default)
     {
         var now = _clock.GetUtcNow();
