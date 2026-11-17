@@ -19,6 +19,9 @@ public class AuctionDeposit : BaseEntity<Guid>
     public required DepositStatus Status { get; set; } = DepositStatus.Pending;
     public int AttemptCount { get; set; } = 1;
 
+    /// <summary>Số lần việc nền (Release, Capture, Refund) thất bại. Tách khỏi AttemptCount vì AttemptCount nằm trong Idempotency-Key tạo hold.</summary>
+    public int ActionFailureCount { get; set; }
+
     /// <summary>Mã hold do Wallet/Payment trả về. Callback chỉ được áp dụng khi holdId khớp giá trị này.</summary>
     public string? GatewayReference { get; set; }
     public string? GatewayMode { get; set; }

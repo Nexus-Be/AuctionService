@@ -2,6 +2,7 @@ namespace Auction.Infrastructure.Clients;
 
 using System.Net;
 using System.Net.Http.Json;
+using System.Linq;
 using System.Text.Json;
 using Auction.Application.Interfaces;
 using Auction.Domain.Enums;
@@ -37,9 +38,10 @@ public sealed class WalletClient : IWalletClient
         {
             referenceType = "AUCTION_DEPOSIT",
             referenceId = command.DepositId,
-            payerUserId = command.PayerUserId,
+            ownerUserId = command.PayerUserId,
             amount = command.Amount,
-            currency = command.Currency
+            currency = command.Currency,
+            metadata = new { auctionId = command.AuctionId, policyVersion = command.PolicyVersion }
         };
 
         using var request = new HttpRequestMessage(HttpMethod.Post, HoldsPath)
@@ -47,14 +49,18 @@ public sealed class WalletClient : IWalletClient
             Content = JsonContent.Create(body, options: JsonOptions)
         };
         request.Headers.TryAddWithoutValidation("Idempotency-Key", ToIdempotencyKey(idempotencyKey));
-        request.Headers.TryAddWithoutValidation("x-user-id", command.PayerUserId.ToString());
 
         var (status, payload) = await SendAsync(request, CreateTimeout, cancellationToken);
         if (status is not (HttpStatusCode.OK or HttpStatusCode.Created))
             throw MapFailure(status, payload);
 
         var holdId = RequireString(payload, "holdId");
-        var state = ParseHoldState(OptionalString(payload, "status"), fallback: DepositHoldState.Authorized) ?? DepositHoldState.Authorized;
+        // A missing status means the hold was just created (Held). An unknown one must not be read as Authorized,
+        // or the buyer could bid without locked money; the deposit then stays Pending and is reconciled by reference.
+        var statusText = OptionalString(payload, "status");
+        var state = statusText is null
+            ? DepositHoldState.Authorized
+            : ParseHoldState(statusText, fallback: null) ?? throw InvalidResponse($"unknown hold status '{statusText}'");
         var authorizedAt = OptionalDate(payload, "authorizedAt") ?? OptionalDate(payload, "heldAt") ?? OptionalDate(payload, "createdAt");
 
         return new DepositHoldCreated(holdId, state, authorizedAt);
@@ -108,7 +114,14 @@ public sealed class WalletClient : IWalletClient
             case HttpStatusCode.Conflict:
                 var code = ErrorCode(payload);
                 if (code == "HOLD_ALREADY_CAPTURED")
-                    return DepositReleaseOutcome.AlreadyCaptured;
+                {
+                    // Wallet answers this for every hold that is no longer Held, including one that was refunded.
+                    // Only a hold that is really Captured still has the buyer's money with someone else.
+                    var current = await GetDepositHoldAsync(holdId, cancellationToken);
+                    return current.Status == DepositHoldState.Captured
+                        ? DepositReleaseOutcome.AlreadyCaptured
+                        : DepositReleaseOutcome.AlreadyGone;
+                }
                 if (code == "HOLD_EXPIRED")
                     return DepositReleaseOutcome.AlreadyGone;
                 throw MapFailure(status, payload);
@@ -122,9 +135,14 @@ public sealed class WalletClient : IWalletClient
     {
         var body = new
         {
-            purpose = command.Purpose,
-            totalAmount = command.TotalAmount,
-            transfers = command.Transfers
+            purpose = string.Equals(command.Purpose, "Forfeit", StringComparison.OrdinalIgnoreCase) ? "FORFEIT" : "ORDER_PAYMENT",
+            orderId = command.OrderId,
+            transfers = command.Transfers.Select(transfer => new
+            {
+                toType = transfer.DestinationType,
+                toOwnerId = transfer.DestinationUserId,
+                amount = transfer.Amount
+            })
         };
 
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{HoldsPath}/{Uri.EscapeDataString(holdId)}/capture")
@@ -139,12 +157,12 @@ public sealed class WalletClient : IWalletClient
     }
 
     public async Task RefundCapturedHoldAsync(
-        string holdId, decimal amount, string reason, string idempotencyKey, CancellationToken cancellationToken = default)
+        string holdId, Guid orderId, decimal amount, string reason, string idempotencyKey, CancellationToken cancellationToken = default)
     {
         var body = new
         {
-            amount,
-            reason
+            reason,
+            orderId
         };
 
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{HoldsPath}/{Uri.EscapeDataString(holdId)}/refund-captured")
@@ -212,8 +230,14 @@ public sealed class WalletClient : IWalletClient
             {
                 Details = ExtractInsufficientBalanceDetails(payload)
             },
-            422 when code == "WALLET_FROZEN" => new DomainException(
+            // Wallet answers 403 for a frozen wallet and 404 for a missing wallet. Both are business refusals for the payer, so they map to 422.
+            403 or 422 when code == "WALLET_FROZEN" => new DomainException(
                 code, "The wallet is currently frozen.", 422),
+            404 when code == "WALLET_NOT_FOUND" => new DomainException(
+                code, "The payer wallet was not found.", 422),
+            // The deposit reference already has a hold with other terms: it was closed before and cannot be reused (no re-deposit).
+            409 when code == "HOLD_REFERENCE_CONFLICT" => new DomainException(
+                "DEPOSIT_HOLD_NOT_ACTIVE", "The payment hold for this deposit is no longer active.", 409),
             422 when code == "PAYER_NOT_ELIGIBLE" => new DomainException(
                 code, "The payer is not allowed to make this payment.", 422),
             >= 500 => new DomainException("WALLET_UNAVAILABLE", "The wallet service is unavailable.", 503),

@@ -621,6 +621,9 @@ public sealed class AuctionService : IAuctionService
     /// PaymentTimedOut xử lý như Expired. SellerAccepted, SellerRejected, SellerExpired (phiên đang Settled) xử lý ở HandleSellerDecisionAsync.
     /// Ghi lịch sử trạng thái, audit và báo realtime AuctionStatusChanged cho người đang xem phiên.
     /// </summary>
+    /// <summary>How far in the future Auction's own payment deadline may be before a "payment timed out" report is refused.</summary>
+    private static readonly TimeSpan PaymentDeadlineTolerance = TimeSpan.FromMinutes(2);
+
     public async Task<SettlementPaymentStatusResponse> HandlePaymentStatusAsync(
         Guid auctionId, SettlementPaymentStatusRequest request, CancellationToken cancellationToken = default)
     {
@@ -702,6 +705,14 @@ public sealed class AuctionService : IAuctionService
             throw new DomainException(
                 "AUCTION_NOT_AWAITING_SETTLEMENT", "The auction is not awaiting settlement.", 409);
 
+        // Commerce says the payment window is over. The deadline Auction stored is the source of truth: if it has not passed, the two
+        // systems disagree, and acting now could forfeit a deposit the buyer still has time to pay. Commerce retries later.
+        if (paymentStatus is SettlementPaymentStatus.Expired or SettlementPaymentStatus.PaymentTimedOut
+            && auction.AuctionSettlement?.PaymentDeadlineAt is { } storedDeadline
+            && storedDeadline > now.Add(PaymentDeadlineTolerance))
+            throw new DomainException(
+                "PAYMENT_DEADLINE_NOT_REACHED", "The payment deadline stored for this auction has not passed yet.", 409);
+
         var previousStatus = state.Status;
         auction.AuctionSettlement ??= new AuctionSettlement
         {
@@ -722,7 +733,7 @@ public sealed class AuctionService : IAuctionService
             _ => AuctionSettlementStatus.Failed
         };
         auction.AuctionSettlement.PaidAt = paymentStatus == SettlementPaymentStatus.Paid
-            ? request.PaidAt
+            ? request.PaidAt ?? now
             : null;
         auction.AuctionSettlement.UpdatedAt = now;
 
@@ -760,6 +771,10 @@ public sealed class AuctionService : IAuctionService
         else if (paymentStatus is SettlementPaymentStatus.Expired or SettlementPaymentStatus.PaymentTimedOut or SettlementPaymentStatus.Failed)
         {
             auction.ViolationState = BackgroundSyncState.Pending;
+            auction.PendingViolationBuyerId = winnerId;
+            auction.PendingViolationOrderId = orderId;
+            auction.PendingViolationOccurredAt = now;
+            auction.PendingViolationIsSecondChance = isSecondChanceNonPayment;
             auction.NextRetryAt = now;
             auction.NeedsAttention = false;
 
@@ -794,7 +809,12 @@ public sealed class AuctionService : IAuctionService
                 auction.NextRetryAt = now;
                 auction.NeedsAttention = false;
 
-                await MarkOtherDepositsForReleaseAsync(auctionId, winnerId, "AUCTION_FAILED", now, cancellationToken);
+                // A cancelled order is not the buyer's fault, so the winner's deposit is released together with everyone else's.
+                // Expired/Failed keep the winner out: that deposit is already queued for forfeit (or release for a second chance).
+                if (paymentStatus == SettlementPaymentStatus.Cancelled)
+                    await MarkOtherDepositsForReleaseAsync(auctionId, Guid.Empty, "ORDER_CANCELLED", now, cancellationToken);
+                else
+                    await MarkOtherDepositsForReleaseAsync(auctionId, winnerId, "AUCTION_FAILED", now, cancellationToken);
 
                 var openAuction = await _dbContext.ProductOpenAuctions
                     .FirstOrDefaultAsync(p => p.AuctionId == auctionId, cancellationToken);
@@ -860,12 +880,12 @@ public sealed class AuctionService : IAuctionService
         if (paymentStatus == SettlementPaymentStatus.Paid)
         {
             await TryResetPaymentStreakAsync(
-                auction, orderId, winnerId, isSecondChanceNonPayment, request.PaidAt ?? now, cancellationToken);
+                auction, orderId, winnerId, isSecondChanceNonPayment, auction.AuctionSettlement.PaidAt ?? now, cancellationToken);
         }
         else if (paymentStatus is SettlementPaymentStatus.Expired or SettlementPaymentStatus.PaymentTimedOut or SettlementPaymentStatus.Failed)
         {
             await TryRecordNonPaymentViolationAsync(
-                auction, orderId, winnerId, isSecondChanceNonPayment, now, cancellationToken);
+                auction, orderId, winnerId, isSecondChanceNonPayment, auction.PendingViolationOccurredAt ?? now, cancellationToken);
         }
 
         // Đã lưu: báo trạng thái mới (Settled hoặc Failed) cho người đang xem phiên. Tạo lời mời thì phiên vẫn Ended nên không báo.
@@ -2771,12 +2791,17 @@ public sealed class AuctionService : IAuctionService
         var now = _clock.GetUtcNow();
         try
         {
-            var deposit = await _dbContext.AuctionDeposits
-                .AsNoTracking()
-                .Where(d => d.AuctionId == auction.Id && d.BidderId == buyerId && !d.IsDeleted)
-                .Select(d => (decimal?)d.Amount)
-                .FirstOrDefaultAsync(cancellationToken);
-            var depositForfeitedAmount = deposit ?? 0m;
+            // The User service requires 0 for second-chance non-payment because that deposit is released, not forfeited.
+            var depositForfeitedAmount = 0m;
+            if (!isSecondChance)
+            {
+                var deposit = await _dbContext.AuctionDeposits
+                    .AsNoTracking()
+                    .Where(d => d.AuctionId == auction.Id && d.BidderId == buyerId && !d.IsDeleted)
+                    .Select(d => (decimal?)d.Amount)
+                    .FirstOrDefaultAsync(cancellationToken);
+                depositForfeitedAmount = deposit ?? 0m;
+            }
 
             var violationType = isSecondChance ? "SecondChanceNonPayment" : "WinnerNonPayment";
             await _users.RecordAuctionViolationAsync(
@@ -2790,6 +2815,7 @@ public sealed class AuctionService : IAuctionService
                 cancellationToken);
 
             auction.ViolationState = BackgroundSyncState.Done;
+            ClearPendingViolation(auction);
             if (auction.StreakResetState != BackgroundSyncState.Pending && auction.StockReleaseState != BackgroundSyncState.Pending)
             {
                 auction.LastError = null;
@@ -2810,6 +2836,14 @@ public sealed class AuctionService : IAuctionService
             {
             }
         }
+    }
+
+    internal static void ClearPendingViolation(AuctionEntity auction)
+    {
+        auction.PendingViolationBuyerId = null;
+        auction.PendingViolationOrderId = null;
+        auction.PendingViolationOccurredAt = null;
+        auction.PendingViolationIsSecondChance = false;
     }
 
     /// <summary>Gọi UserService (API 25) để reset ViolationStreak về 0 khi Buyer thanh toán đúng hạn. Thành công đổi StreakResetState = Done; lỗi thì cập nhật backoff để job quét retry.</summary>

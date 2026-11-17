@@ -154,6 +154,11 @@ public sealed class DepositService : IDepositService
             var existingHold = await _wallet.GetDepositHoldByReferenceAsync(deposit.Id, cancellationToken);
             if (existingHold is not null)
             {
+                // A hold that was already released, captured or refunded no longer locks any money, so it must not unlock bidding.
+                if (existingHold.Status != DepositHoldState.Authorized)
+                    throw new DomainException(
+                        "DEPOSIT_HOLD_NOT_ACTIVE", "The payment hold for this deposit is no longer active.", 409);
+
                 deposit.GatewayReference = existingHold.HoldId;
                 deposit.Status = DepositStatus.Authorized;
                 deposit.AuthorizedAt = existingHold.AuthorizedAt ?? now;
@@ -251,12 +256,13 @@ public sealed class DepositService : IDepositService
         {
             hold = await _wallet.CreateDepositHoldAsync(
                 new CreateDepositHoldCommand(
-                    deposit.Id, actor.UserId, deposit.Amount, DepositRules.Currency),
+                    deposit.Id, actor.UserId, deposit.Amount, DepositRules.Currency, auctionId, deposit.PolicyVersion),
                 $"deposit:{deposit.Id}:{deposit.AttemptCount}",
                 cancellationToken);
         }
-        catch (DomainException ex) when (ex.StatusCode == 422)
+        catch (DomainException ex) when (ex.StatusCode == 422 || ex.ErrorCode == "DEPOSIT_HOLD_NOT_ACTIVE")
         {
+            // A refusal locked nothing (422), and a closed reference can never lock again (409): both end this attempt.
             deposit.Status = DepositStatus.Failed;
             deposit.FailureCode = ex.ErrorCode;
             deposit.UpdatedAt = now;
@@ -267,6 +273,34 @@ public sealed class DepositService : IDepositService
                 userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
             await SaveAsync(cancellationToken);
             throw;
+        }
+
+        if (hold.Status == DepositHoldState.PendingAuthorization)
+        {
+            // Not locked yet: keep the deposit Pending so the reconcile job authorizes or fails it by reference.
+            deposit.GatewayReference = hold.HoldId;
+            deposit.UpdatedAt = now;
+            deposit.RowVersion += 1;
+            await SaveAsync(cancellationToken);
+            throw new DomainException(
+                "WALLET_UNAVAILABLE", "The deposit hold is still being confirmed. Check again shortly.", 503);
+        }
+
+        if (hold.Status != DepositHoldState.Authorized)
+        {
+            // Captured, Released or Refunded: the hold is closed and holds no money, so nothing needs to be released.
+            deposit.Status = DepositStatus.Failed;
+            deposit.FailureCode = "HOLD_NOT_ACTIVE";
+            deposit.GatewayReference = hold.HoldId;
+            deposit.UpdatedAt = now;
+            deposit.RowVersion += 1;
+            _dbContext.AddAuditLog(
+                AuditAction.DepositFail, "AuctionDeposit", deposit.Id.ToString(),
+                newValues: new { depositId = deposit.Id, failureCode = deposit.FailureCode, holdStatus = hold.Status.ToString() },
+                userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+            await SaveAsync(cancellationToken);
+            throw new DomainException(
+                "DEPOSIT_HOLD_NOT_ACTIVE", "The payment hold for this deposit is no longer active.", 409);
         }
 
         // 8. Synchronous lock succeeded: immediately transition deposit to Authorized and return 201 Created.
@@ -534,17 +568,39 @@ public sealed class DepositService : IDepositService
                 $"release:{deposit.Id}:{deposit.AttemptCount}", cancellationToken);
 
             if (outcome == DepositReleaseOutcome.AlreadyCaptured)
-                _logger.LogError(
-                    "Deposit {DepositId} could not be released because hold {HoldId} was already captured. An admin must check it.",
-                    deposit.Id, deposit.GatewayReference);
+            {
+                var cancelledOrder = await _dbContext.AuctionSettlements.AsNoTracking()
+                    .AnyAsync(s => s.AuctionId == deposit.AuctionId && s.WinnerId == deposit.BidderId &&
+                                   s.OrderId != null && s.Status == AuctionSettlementStatus.Cancelled &&
+                                   !s.IsDeleted, cancellationToken);
+                if (cancelledOrder)
+                {
+                    deposit.Status = DepositStatus.Captured;
+                    deposit.PendingAction = DepositPendingAction.Refund;
+                    deposit.ReleasePending = false;
+                    deposit.NextRetryAt = _clock.GetUtcNow();
+                    deposit.LastError = null;
+                    deposit.UpdatedAt = _clock.GetUtcNow();
+                    deposit.RowVersion += 1;
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                    return;
+                }
+                deposit.NeedsAttention = true;
+                deposit.LastError = "Wallet hold was captured while Auction requested release.";
+                _logger.LogError("Captured hold {HoldId} for deposit {DepositId} requires manual review.",
+                    deposit.GatewayReference, deposit.Id);
+            }
             else
                 deposit.ReleasedAt = _clock.GetUtcNow();
 
             deposit.ReleasePending = false;
             deposit.PendingAction = DepositPendingAction.None;
             deposit.NextRetryAt = null;
-            deposit.LastError = null;
-            deposit.NeedsAttention = false;
+            if (!deposit.NeedsAttention)
+            {
+                deposit.LastError = null;
+                deposit.ActionFailureCount = 0;
+            }
             deposit.UpdatedAt = _clock.GetUtcNow();
             deposit.RowVersion += 1;
             await _dbContext.SaveChangesAsync(cancellationToken);
@@ -670,7 +726,7 @@ public sealed class DepositService : IDepositService
                 DepositPendingAction.Refund => "REFUND_RETRYING",
                 _ => d.ReleasePending ? "RELEASE_RETRYING" : null
             };
-            bool needsAttention = d.NeedsAttention || d.AttemptCount > 10;
+            bool needsAttention = d.NeedsAttention || d.ActionFailureCount > 10;
             string? capturePurpose = d.CapturePurpose ?? (d.Status == DepositStatus.Captured ? "OrderPayment" : null);
             DateTimeOffset? capturedAt = d.CapturedAt ?? (d.Status == DepositStatus.Captured ? d.UpdatedAt : null);
 
@@ -852,6 +908,128 @@ public sealed class DepositService : IDepositService
             cancellationToken.ThrowIfCancellationRequested();
             await ReconcilePendingDepositAsync(deposit, now, cancellationToken);
         }
+
+        await ReconcileOrphanedDepositsAsync(limit, cancellationToken);
+    }
+
+    /// <summary>How long an Authorized deposit on a closed auction is left alone, so a settlement that is still being processed is not raced.</summary>
+    internal static readonly TimeSpan OrphanedDepositGrace = TimeSpan.FromMinutes(5);
+
+    internal enum OrphanedDepositOutcome { Release, ForfeitForNonPayment, CaptureForOrder }
+
+    /// <summary>
+    /// Decides what to do with an Authorized deposit whose auction is already closed and which has no work queued.
+    /// Money is only taken when Auction's own records prove the buyer owed it; anything doubtful goes back to the buyer.
+    /// </summary>
+    internal static OrphanedDepositOutcome DecideOrphanedDeposit(
+        AuctionDeposit deposit, AuctionSettlement? settlement, bool boughtAsRunnerUp, DateTimeOffset now)
+    {
+        if (settlement?.WinnerId is not { } winnerId || winnerId != deposit.BidderId)
+            return OrphanedDepositOutcome.Release;
+
+        // The buyer paid for the order, so the deposit was applied to it and the capture was simply never queued.
+        if (settlement.Status == AuctionSettlementStatus.Paid)
+            return OrphanedDepositOutcome.CaptureForOrder;
+
+        // Both winner and runner-up (who accepted second chance) forfeit their deposit once the stored payment deadline has passed.
+        if (settlement.Status is AuctionSettlementStatus.Expired or AuctionSettlementStatus.Failed
+            && settlement.PaymentDeadlineAt is { } deadline && deadline <= now)
+            return OrphanedDepositOutcome.ForfeitForNonPayment;
+
+        return OrphanedDepositOutcome.Release;
+    }
+
+    /// <summary>
+    /// Finds deposits still Authorized on an auction that is Failed, Cancelled or Settled and queues the missing release or capture.
+    /// Without it, a callback that was lost, handled by older code or contradicted by stale data leaves the buyer's money locked for good.
+    /// </summary>
+    private async Task ReconcileOrphanedDepositsAsync(int limit, CancellationToken cancellationToken)
+    {
+        var now = _clock.GetUtcNow();
+        var cutoff = now - OrphanedDepositGrace;
+
+        var orphans = await _dbContext.AuctionDeposits
+            .Where(d => !d.IsDeleted
+                        && d.Status == DepositStatus.Authorized
+                        && d.PendingAction == DepositPendingAction.None
+                        && !d.ReleasePending
+                        && !d.NeedsAttention
+                        && d.UpdatedAt <= cutoff
+                        && _dbContext.AuctionStates.Any(s => s.AuctionId == d.AuctionId && !s.IsDeleted
+                            && (s.Status == AuctionStatus.Failed || s.Status == AuctionStatus.Cancelled || s.Status == AuctionStatus.Settled)))
+            .OrderBy(d => d.UpdatedAt)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
+        if (orphans.Count == 0)
+            return;
+
+        foreach (var deposit in orphans)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var settlement = await _dbContext.AuctionSettlements
+                .FirstOrDefaultAsync(s => s.AuctionId == deposit.AuctionId && !s.IsDeleted, cancellationToken);
+            var boughtAsRunnerUp = await _dbContext.AuctionWinnerOffers.AnyAsync(
+                o => o.AuctionId == deposit.AuctionId && o.BidderId == deposit.BidderId && o.Status == AuctionWinnerOfferStatus.Accepted,
+                cancellationToken);
+
+            var outcome = DecideOrphanedDeposit(deposit, settlement, boughtAsRunnerUp, now);
+            _logger.LogWarning(
+                "Deposit {DepositId} of auction {AuctionId} is still Authorized on a closed auction. Reconciling: {Outcome}.",
+                deposit.Id, deposit.AuctionId, outcome);
+
+            switch (outcome)
+            {
+                case OrphanedDepositOutcome.Release:
+                    deposit.Status = DepositStatus.Released;
+                    deposit.ReleasePending = true;
+                    deposit.PendingAction = DepositPendingAction.Release;
+                    deposit.ReleaseReason = "RECONCILED_CLOSED_AUCTION";
+                    break;
+
+                case OrphanedDepositOutcome.CaptureForOrder:
+                    deposit.PendingAction = DepositPendingAction.Capture;
+                    deposit.PendingPurpose = "OrderPayment";
+                    break;
+
+                case OrphanedDepositOutcome.ForfeitForNonPayment:
+                    deposit.PendingAction = DepositPendingAction.Capture;
+                    deposit.PendingPurpose = "Forfeit";
+                    await QueueMissingViolationAsync(deposit, settlement!, boughtAsRunnerUp, now, cancellationToken);
+                    break;
+            }
+
+            deposit.NextRetryAt = now;
+            deposit.NeedsAttention = false;
+            deposit.UpdatedAt = now;
+            deposit.RowVersion += 1;
+
+            _dbContext.AddAuditLog(
+                AuditAction.DepositReconcile, "AuctionDeposit", deposit.Id.ToString(),
+                oldValues: new { status = DepositStatus.Authorized },
+                newValues: new { depositId = deposit.Id, auctionId = deposit.AuctionId, outcome = outcome.ToString() });
+        }
+
+        await _dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    /// <summary>A forfeited deposit goes with a violation for the buyer. Queue it if the auction has none queued or sent.</summary>
+    private async Task QueueMissingViolationAsync(
+        AuctionDeposit deposit, AuctionSettlement settlement, bool isSecondChance, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var auction = await _dbContext.Auctions.FirstOrDefaultAsync(a => a.Id == deposit.AuctionId, cancellationToken);
+        if (auction is null || auction.ViolationState != BackgroundSyncState.None || settlement.OrderId is not { } orderId)
+            return;
+
+        auction.ViolationState = BackgroundSyncState.Pending;
+        auction.PendingViolationBuyerId = deposit.BidderId;
+        auction.PendingViolationOrderId = orderId;
+        auction.PendingViolationOccurredAt = settlement.PaymentDeadlineAt ?? now;
+        auction.PendingViolationIsSecondChance = isSecondChance;
+        auction.NextRetryAt = now;
+        auction.NeedsAttention = false;
+        auction.UpdatedAt = now;
     }
 
     private async Task ProcessSingleDepositReleaseAsync(AuctionDeposit deposit, CancellationToken cancellationToken)
@@ -879,13 +1057,16 @@ public sealed class DepositService : IDepositService
                 return;
             }
 
-            if (snapshot is null || snapshot.Status is DepositHoldState.Released or DepositHoldState.Voided or DepositHoldState.Expired or DepositHoldState.Failed)
+            // Refunded money is already back with the buyer, so there is nothing left to release either.
+            if (snapshot is null || snapshot.Status is DepositHoldState.Released or DepositHoldState.Voided or DepositHoldState.Expired
+                    or DepositHoldState.Failed or DepositHoldState.Refunded)
             {
                 var now = _clock.GetUtcNow();
                 deposit.ReleasePending = false;
                 deposit.PendingAction = DepositPendingAction.None;
                 deposit.NextRetryAt = null;
                 deposit.LastError = null;
+                deposit.ActionFailureCount = 0;
                 deposit.NeedsAttention = false;
                 deposit.ReleasedAt = now;
                 deposit.UpdatedAt = now;
@@ -931,10 +1112,19 @@ public sealed class DepositService : IDepositService
                 sellerPercent = policy.SellerPercent;
             }
 
+            Guid? orderId = null;
+            if (!string.Equals(purpose, "Forfeit", StringComparison.OrdinalIgnoreCase))
+            {
+                orderId = await _dbContext.AuctionSettlements.AsNoTracking()
+                    .Where(s => s.AuctionId == deposit.AuctionId && s.WinnerId == deposit.BidderId && !s.IsDeleted)
+                    .Select(s => s.OrderId).FirstOrDefaultAsync(cancellationToken);
+                if (orderId is null)
+                    throw new DomainException("ORDER_NOT_READY", "The auction order is not ready for deposit capture.", 503);
+            }
             var transfers = BuildCaptureTransfers(deposit, purpose, auction?.SellerId, sellerPercent);
             await _wallet.CaptureDepositHoldAsync(
                 deposit.GatewayReference,
-                new CaptureDepositHoldCommand(purpose, deposit.Amount, transfers),
+                new CaptureDepositHoldCommand(purpose, deposit.Amount, transfers, orderId),
                 $"capture:{deposit.Id}",
                 cancellationToken);
 
@@ -944,6 +1134,7 @@ public sealed class DepositService : IDepositService
             deposit.PendingAction = DepositPendingAction.None;
             deposit.NextRetryAt = null;
             deposit.LastError = null;
+            deposit.ActionFailureCount = 0;
             deposit.NeedsAttention = false;
             deposit.UpdatedAt = now;
             deposit.RowVersion += 1;
@@ -982,8 +1173,14 @@ public sealed class DepositService : IDepositService
                 deposit.GatewayReference = snapshot.HoldId;
             }
 
+            var orderId = await _dbContext.AuctionSettlements.AsNoTracking()
+                .Where(s => s.AuctionId == deposit.AuctionId && s.WinnerId == deposit.BidderId && !s.IsDeleted)
+                .Select(s => s.OrderId).FirstOrDefaultAsync(cancellationToken);
+            if (orderId is null)
+                throw new DomainException("ORDER_NOT_READY", "The auction order is not ready for deposit refund.", 503);
             await _wallet.RefundCapturedHoldAsync(
                 deposit.GatewayReference,
+                orderId.Value,
                 deposit.Amount,
                 deposit.ReleaseReason ?? "SELLER_REJECTED",
                 $"refund:{deposit.Id}",
@@ -995,6 +1192,7 @@ public sealed class DepositService : IDepositService
             deposit.ReleasePending = false;
             deposit.NextRetryAt = null;
             deposit.LastError = null;
+            deposit.ActionFailureCount = 0;
             deposit.NeedsAttention = false;
             deposit.UpdatedAt = now;
             deposit.RowVersion += 1;
@@ -1080,6 +1278,15 @@ public sealed class DepositService : IDepositService
     private static IReadOnlyList<HoldTransferInstruction> BuildCaptureTransfers(
         AuctionDeposit deposit, string purpose, Guid? sellerId, decimal sellerPercent = 70m)
     {
+        // Wallet accepts only SELLER_WALLET and PLATFORM recipients for a forfeit, so a missing seller sends the whole amount to the platform.
+        if (string.Equals(purpose, "Forfeit", StringComparison.OrdinalIgnoreCase) && !sellerId.HasValue)
+        {
+            return new[]
+            {
+                new HoldTransferInstruction("PLATFORM", null, deposit.Amount, "Forfeited auction deposit for platform")
+            };
+        }
+
         if (string.Equals(purpose, "Forfeit", StringComparison.OrdinalIgnoreCase) && sellerId.HasValue)
         {
             var clampedSellerPercent = Math.Clamp(sellerPercent, 0m, 100m);
@@ -1087,17 +1294,17 @@ public sealed class DepositService : IDepositService
             var platformShare = deposit.Amount - sellerShare;
             var list = new List<HoldTransferInstruction>();
             if (sellerShare > 0m)
-                list.Add(new HoldTransferInstruction("USER_WALLET", sellerId.Value, sellerShare, "Forfeited auction deposit share for seller"));
+                list.Add(new HoldTransferInstruction("SELLER_WALLET", sellerId.Value, sellerShare, "Forfeited auction deposit share for seller"));
             if (platformShare > 0m)
-                list.Add(new HoldTransferInstruction("PLATFORM_REVENUE", null, platformShare, "Forfeited auction deposit share for platform"));
+                list.Add(new HoldTransferInstruction("PLATFORM", null, platformShare, "Forfeited auction deposit share for platform"));
             return list;
         }
 
         return new[]
         {
             new HoldTransferInstruction(
-                "ESCROW",
-                sellerId,
+                "SYSTEM_ESCROW",
+                null,
                 deposit.Amount,
                 $"Auction deposit applied to order payment for auction {deposit.AuctionId}")
         };
@@ -1105,16 +1312,17 @@ public sealed class DepositService : IDepositService
 
     private static void RecordDepositActionFailure(AuctionDeposit deposit, string error, DateTimeOffset now)
     {
-        deposit.AttemptCount += 1;
+        // AttemptCount is part of the Idempotency-Key that creates the hold, so failed retries are counted separately.
+        deposit.ActionFailureCount += 1;
         deposit.LastError = error.Length > 500 ? error[..500] : error;
-        if (deposit.AttemptCount > 10)
+        if (deposit.ActionFailureCount > 10)
         {
             deposit.NeedsAttention = true;
             deposit.NextRetryAt = null;
         }
         else
         {
-            var backoffMinutes = deposit.AttemptCount switch
+            var backoffMinutes = deposit.ActionFailureCount switch
             {
                 <= 1 => 1,
                 2 => 2,

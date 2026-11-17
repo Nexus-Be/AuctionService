@@ -105,7 +105,9 @@ builder.Services.AddSingleton(new DepositOptions(
 builder.Services.AddHttpClient<IWalletClient, WalletClient>(client =>
 {
     client.BaseAddress = new Uri(builder.Configuration["Wallet:BaseUrl"] ?? "http://localhost:8008");
-    client.Timeout = TimeSpan.FromSeconds(10); // Wallet routes are plain REST: no X-Internal-Service-Key is sent
+    client.Timeout = TimeSpan.FromSeconds(10);
+    if (!string.IsNullOrWhiteSpace(internalServiceKey))
+        client.DefaultRequestHeaders.Add("X-Internal-Service-Key", internalServiceKey);
 });
 
 // Đồng bộ trạng thái sản phẩm sang Catalog (mở khoá khi phiên huỷ hoặc thất bại, chốt bán khi Seller chấp nhận đơn): hàng đợi trong bộ nhớ, gửi nền, thử lại khi lỗi.

@@ -107,6 +107,7 @@ public sealed class CommerceSyncWorker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var limiter = new SemaphoreSlim(MaxParallel);
+        var scan = ScanMissingSettlementsAsync(stoppingToken);
 
         try
         {
@@ -139,6 +140,35 @@ public sealed class CommerceSyncWorker : BackgroundService
         {
             // Service đang tắt.
         }
+        finally
+        {
+            try { await scan; }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+        }
+    }
+
+    private async Task ScanMissingSettlementsAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMinutes(1));
+        do
+        {
+            try
+            {
+                using var scope = _scopes.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<IAuctionDbContext>();
+                var missing = await db.AuctionSettlements.AsNoTracking()
+                    .Where(s => s.Status == AuctionSettlementStatus.PendingPayment && s.OrderId == null &&
+                                s.WinnerId != null && s.PaymentDeadlineAt != null && !s.IsDeleted)
+                    .OrderBy(s => s.CreatedAt).Select(s => s.AuctionId)
+                    .Take(100).ToListAsync(cancellationToken);
+                foreach (var auctionId in missing) _queue.PushSettlement(auctionId);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Could not scan pending Commerce settlements; the next scan will retry.");
+            }
+        } while (await timer.WaitForNextTickAsync(cancellationToken));
     }
 
     private async Task ProcessAsync(CommerceSyncItem item, CancellationToken cancellationToken)
@@ -189,16 +219,16 @@ public sealed class CommerceSyncWorker : BackgroundService
                     .AnyAsync(o => o.AuctionId == auction.Id && o.BidderId == winnerId && o.Status == AuctionWinnerOfferStatus.Accepted && !o.IsDeleted, cancellationToken);
                 var source = isSecondChance ? "SECOND_CHANCE" : "WINNER";
 
-                var depositAmount = await db.AuctionDeposits
+                var deposit = await db.AuctionDeposits
                     .AsNoTracking()
                     .Where(d => d.AuctionId == auction.Id && d.BidderId == winnerId && !d.IsDeleted &&
                                 (d.Status == DepositStatus.Authorized || d.Status == DepositStatus.Captured))
-                    .Select(d => (decimal?)d.Amount)
-                    .FirstOrDefaultAsync(cancellationToken) ?? 0m;
+                    .Select(d => new { d.Id, d.Amount })
+                    .FirstOrDefaultAsync(cancellationToken);
 
                 var payload = new CommerceSettlementPayload(
                     auction.Id, winningBidId, winnerId, auction.SellerId, auction.ProductId, skuId,
-                    productName, imageUrl, winningAmount, paymentDeadline, depositAmount, source);
+                    productName, imageUrl, winningAmount, paymentDeadline, deposit?.Amount ?? 0m, source, deposit?.Id);
 
                 var commerce = scope.ServiceProvider.GetRequiredService<ICommerceClient>();
                 var orderId = await commerce.SendSettlementAsync(payload, cancellationToken);
