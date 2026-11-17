@@ -17,7 +17,8 @@ public sealed record CommerceSettlementPayload(
     decimal WinningAmount,
     DateTimeOffset PaymentDeadlineAt,
     decimal DepositAmount = 0m,
-    string Source = "WINNER");
+    string Source = "WINNER",
+    Guid? DepositId = null);
 
 public interface ICommerceClient
 {

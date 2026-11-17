@@ -9,5 +9,6 @@ public enum DepositHoldState
     Released = 3,
     Voided = 4,
     Expired = 5,
-    Failed = 6
+    Failed = 6,
+    Refunded = 7
 }

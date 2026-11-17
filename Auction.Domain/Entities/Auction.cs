@@ -21,6 +21,13 @@ public class Auction : AuditableEntity<Guid>
 
     // Background sync states (Overview 4.1)
     public BackgroundSyncState ViolationState { get; set; } = BackgroundSyncState.None;
+
+    // The violation waiting to be sent to the User service, captured when it is decided. The settlement is reset when a
+    // runner-up accepts an offer, so the retry must not read the buyer, order or time from it.
+    public Guid? PendingViolationBuyerId { get; set; }
+    public Guid? PendingViolationOrderId { get; set; }
+    public DateTimeOffset? PendingViolationOccurredAt { get; set; }
+    public bool PendingViolationIsSecondChance { get; set; }
     public BackgroundSyncState StreakResetState { get; set; } = BackgroundSyncState.None;
     public BackgroundSyncState StockReleaseState { get; set; } = BackgroundSyncState.None;
     public int AttemptCount { get; set; }

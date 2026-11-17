@@ -34,14 +34,16 @@ public interface IWalletClient
 
     /// <summary>W5: Refunds a previously captured deposit hold back to the buyer's wallet when the seller rejects or lets the order expire.</summary>
     Task RefundCapturedHoldAsync(
-        string holdId, decimal amount, string reason, string idempotencyKey, CancellationToken cancellationToken = default);
+        string holdId, Guid orderId, decimal amount, string reason, string idempotencyKey, CancellationToken cancellationToken = default);
 }
 
 public sealed record CreateDepositHoldCommand(
     Guid DepositId,
     Guid PayerUserId,
     decimal Amount,
-    string Currency);
+    string Currency,
+    Guid AuctionId,
+    int PolicyVersion);
 
 public sealed record DepositHoldCreated(
     string HoldId,
@@ -67,7 +69,8 @@ public sealed record HoldTransferInstruction(
 public sealed record CaptureDepositHoldCommand(
     string Purpose,
     decimal TotalAmount,
-    IReadOnlyList<HoldTransferInstruction> Transfers);
+    IReadOnlyList<HoldTransferInstruction> Transfers,
+    Guid? OrderId);
 
 public enum DepositReleaseOutcome
 {

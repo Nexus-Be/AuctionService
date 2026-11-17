@@ -524,36 +524,50 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
 
         if (auction.ViolationState == BackgroundSyncState.Pending)
         {
-            if (buyerId is null || orderId == Guid.Empty)
+            // Prefer the snapshot taken when the violation was decided; older rows without it fall back to the settlement.
+            var violationBuyerId = auction.PendingViolationBuyerId ?? buyerId;
+            var violationOrderId = auction.PendingViolationOrderId ?? orderId;
+            var violationIsSecondChance = auction.PendingViolationBuyerId.HasValue ? auction.PendingViolationIsSecondChance : isSecondChance;
+            var violationOccurredAt = auction.PendingViolationOccurredAt ?? settlement?.UpdatedAt ?? now;
+
+            if (violationBuyerId is null || violationOrderId == Guid.Empty)
             {
                 auction.ViolationState = BackgroundSyncState.Done;
+                auction.PendingViolationBuyerId = null; auction.PendingViolationOrderId = null; auction.PendingViolationOccurredAt = null; auction.PendingViolationIsSecondChance = false;
             }
             else
             {
                 try
                 {
-                    var depAmount = await _dbContext.AuctionDeposits
-                        .AsNoTracking()
-                        .Where(d => d.AuctionId == auction.Id && d.BidderId == buyerId.Value && !d.IsDeleted)
-                        .Select(d => (decimal?)d.Amount)
-                        .FirstOrDefaultAsync(cancellationToken);
-                    var forfeited = depAmount ?? 0m;
+                    // Second-chance non-payment forfeits nothing (the deposit is released), and the User service requires 0 for it.
+                    var forfeited = 0m;
+                    if (!violationIsSecondChance)
+                    {
+                        var depAmount = await _dbContext.AuctionDeposits
+                            .AsNoTracking()
+                            .Where(d => d.AuctionId == auction.Id && d.BidderId == violationBuyerId.Value && !d.IsDeleted)
+                            .Select(d => (decimal?)d.Amount)
+                            .FirstOrDefaultAsync(cancellationToken);
+                        forfeited = depAmount ?? 0m;
+                    }
 
-                    var violationType = isSecondChance ? "SecondChanceNonPayment" : "WinnerNonPayment";
+                    var violationType = violationIsSecondChance ? "SecondChanceNonPayment" : "WinnerNonPayment";
                     await _users.RecordAuctionViolationAsync(
                         new RecordAuctionViolationCommand(
-                            buyerId.Value,
+                            violationBuyerId.Value,
                             violationType,
                             auction.Id,
-                            orderId,
-                            settlement?.UpdatedAt ?? now,
+                            violationOrderId,
+                            violationOccurredAt,
                             forfeited),
                         cancellationToken);
                     auction.ViolationState = BackgroundSyncState.Done;
+                    auction.PendingViolationBuyerId = null; auction.PendingViolationOrderId = null; auction.PendingViolationOccurredAt = null; auction.PendingViolationIsSecondChance = false;
                 }
                 catch (DomainException ex) when (ex.StatusCode == 404)
                 {
                     auction.ViolationState = BackgroundSyncState.Done;
+                    auction.PendingViolationBuyerId = null; auction.PendingViolationOrderId = null; auction.PendingViolationOccurredAt = null; auction.PendingViolationIsSecondChance = false;
                 }
                 catch (DomainException ex)
                 {

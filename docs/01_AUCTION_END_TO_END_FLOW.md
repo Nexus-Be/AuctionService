@@ -24,7 +24,7 @@ flowchart TD
     J -->|Người về nhì Từ chối hoặc Quá 24h không trả lời| K["Phiên thất bại<br/>Hoàn trả 100% cọc cho Người về nhì (Không phạt) & Mở khóa hàng"]
     J -->|Người về nhì Đồng ý mua| L["Tạo đơn hàng cho Người về nhì (Hạn thanh toán 24h)<br/>Khấu trừ tiền cọc của Người về nhì vào đơn"]
     L -->|Người về nhì thanh toán trong 24h| F
-    L -->|Người về nhì bỏ kèo quá 24h không trả tiền| M["Phiên thất bại<br/>Tịch thu cọc Người về nhì (70% Người bán / 30% Sàn) + Phạt điểm & Mở khóa hàng"]
+    L -->|Người về nhì bỏ kèo quá 24h không trả tiền| M["Phiên thất bại<br/>Tịch thu cọc Người về nhì (70% Người bán / 30% Sàn) + Tăng chuỗi vi phạm & Trừ điểm uy tín + Mở khóa hàng"]
 ```
 
 ---
@@ -176,7 +176,7 @@ Khi nhận được lời mời mua lại trong 24 giờ, Người về nhì có
 3. **Cách 3 — Đã bấm "Đồng ý mua" nhưng sau đó lại bỏ kèo không thanh toán trong 24 giờ**:
    - Một khi đã chủ động bấm **"Đồng ý mua"** để hệ thống tạo đơn hàng và giữ hàng cho mình mà lại không thanh toán sau 24 giờ, Người về nhì được xem là **bùng kèo có chủ đích** và chịu hình phạt giống hệt Người thắng:
      1. **Tịch thu 100% tiền cọc của Người về nhì** (chia **70% cho Người bán / 30% cho Sàn**).
-     2. **Tăng chuỗi vi phạm liên tiếp + Trừ điểm uy tín của Người về nhì**.
+     2. **Tăng chuỗi vi phạm liên tiếp + Trừ điểm uy tín của Người về nhì** (áp dụng đầy đủ các mốc phạt cảnh báo, tăng tỷ lệ cọc +10%, tạm khóa 7 ngày hoặc đình chỉ vô thời hạn).
      3. Phiên đấu giá chuyển sang **Thất bại** và mở khóa sản phẩm cho Người bán.
 
 #### Tình huống 6.3: Người mua đã trả đủ tiền nhưng Người bán từ chối giao hàng (hoặc ngâm đơn quá 24 giờ)

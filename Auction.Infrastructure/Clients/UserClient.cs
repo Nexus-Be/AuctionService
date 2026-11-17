@@ -13,7 +13,7 @@ using Microsoft.Extensions.Logging;
 /// DefaultTimeout (check-reputation, batch-public-info) and BidTimeout (verify-bid-eligibility) are optional;
 /// when empty the built-in values (2 seconds and 800 milliseconds) are used. Raise them for local tests with a remote database.
 /// </summary>
-public sealed record UserClientOptions(bool BypassUserCheck, TimeSpan? DefaultTimeout = null, TimeSpan? BidTimeout = null);
+public sealed record UserClientOptions(bool BypassUserCheck, TimeSpan? DefaultTimeout = null, TimeSpan? BidTimeout = null, TimeSpan? WriteTimeout = null);
 
 /// <summary>REST client of the User service (internal APIs used by Auction).</summary>
 public sealed class UserClient : IUserClient
@@ -32,6 +32,9 @@ public sealed class UserClient : IUserClient
     // Bidding is a hot path: a slow User service must not hold connections of Auction.
     private static readonly TimeSpan BuiltInBidTimeout = TimeSpan.FromMilliseconds(800);
     private static readonly TimeSpan BuiltInDefaultTimeout = TimeSpan.FromSeconds(2);
+    // Recording a violation or a payment writes to the User database, which takes longer than a read, especially on a cold connection.
+    // A timeout there is retried by the background job, but it delays the buyer's record, so it gets more room.
+    private static readonly TimeSpan BuiltInWriteTimeout = TimeSpan.FromSeconds(10);
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -41,6 +44,7 @@ public sealed class UserClient : IUserClient
     private readonly IMemoryCache _cache;
     private readonly TimeSpan _bidTimeout;
     private readonly TimeSpan _defaultTimeout;
+    private readonly TimeSpan _writeTimeout;
 
     public UserClient(HttpClient http, UserClientOptions options, ILogger<UserClient> logger, IMemoryCache cache)
     {
@@ -50,6 +54,7 @@ public sealed class UserClient : IUserClient
         _cache = cache;
         _bidTimeout = options.BidTimeout ?? BuiltInBidTimeout;
         _defaultTimeout = options.DefaultTimeout ?? BuiltInDefaultTimeout;
+        _writeTimeout = options.WriteTimeout ?? BuiltInWriteTimeout;
     }
 
     public async Task<UserReputationCheck> CheckSellerReputationAsync(Guid userId, CancellationToken cancellationToken = default)
@@ -171,7 +176,7 @@ public sealed class UserClient : IUserClient
             command.DepositForfeitedAmount);
 
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutSource.CancelAfter(_defaultTimeout);
+        timeoutSource.CancelAfter(_writeTimeout);
 
         try
         {
@@ -244,7 +249,7 @@ public sealed class UserClient : IUserClient
             command.PaidAt);
 
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutSource.CancelAfter(_defaultTimeout);
+        timeoutSource.CancelAfter(_writeTimeout);
 
         try
         {
