@@ -62,10 +62,25 @@ public sealed record SettlementPaymentStatusRequest(
     DateTimeOffset? PaidAt,
     string? EventId,
     string? OrderSource = null,
-    DateTimeOffset? OccurredAt = null);
+    DateTimeOffset? OccurredAt = null,
+    string? OrderNo = null,
+    decimal? TotalAmount = null,
+    DateTimeOffset? SellerRespondDeadlineAt = null);
 
 /// <summary>Dữ liệu người về nhì gửi khi chấp nhận lời mời mua lại (API 07). AcceptedPrice bắt buộc phải khớp giá mời.</summary>
 public sealed record AcceptSecondChanceRequest(decimal? AcceptedPrice);
 
 /// <summary>Dữ liệu bidder gửi khi từ chối lời mời trở thành người thắng. Lý do là tuỳ chọn.</summary>
 public sealed record DeclineWinnerOfferRequest(string? Reason);
+
+public sealed record AuctionListFilter(
+    string? Status = null,
+    string? Keyword = null,
+    Guid? SellerId = null,
+    Guid? ProductId = null,
+    decimal? MinPrice = null,
+    decimal? MaxPrice = null,
+    int? EndingWithinMinutes = null,
+    string? SortBy = null);
+
+public sealed record InvalidateBidRequest(string? Reason = null);

@@ -26,6 +26,7 @@ public class AppDbContext : DbContext, IAuctionDbContext
     public DbSet<AuctionDeposit> AuctionDeposits => Set<AuctionDeposit>();
     public DbSet<DepositCallbackEvent> DepositCallbackEvents => Set<DepositCallbackEvent>();
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
+    public DbSet<NotificationOutboxItem> NotificationOutbox => Set<NotificationOutboxItem>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

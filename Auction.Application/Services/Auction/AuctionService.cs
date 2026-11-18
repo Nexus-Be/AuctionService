@@ -59,15 +59,437 @@ public sealed class AuctionService : IAuctionService
 
     // ------------------------------------------------------------------ Queries
 
-    /// <summary>Lấy danh sách phiên đấu giá có phân trang, lọc theo trạng thái (tuỳ chọn). Dùng cho trang danh sách công khai.</summary>
+    /// <summary>Lấy danh sách phiên đấu giá có phân trang, tìm kiếm, lọc và sắp xếp. Dùng cho trang danh sách công khai.</summary>
     public Task<PagedData<AuctionSummaryDto>> ListActiveAuctionsAsync(
-        int page = 1, int pageSize = 20, string? status = null, CancellationToken cancellationToken = default)
-        => ListAuctionsAsync(sellerId: null, page, pageSize, status, cancellationToken);
+        int page = 1, int pageSize = 20, AuctionListFilter? filter = null, CancellationToken cancellationToken = default)
+        => ListAuctionsAsync(page, pageSize, filter ?? new AuctionListFilter(), cancellationToken);
 
     /// <summary>Lấy danh sách phiên của riêng một seller (có phân trang, lọc theo trạng thái). Dùng cho trang quản lý của seller.</summary>
     public Task<PagedData<AuctionSummaryDto>> ListSellerAuctionsAsync(
         Guid sellerId, int page = 1, int pageSize = 20, string? status = null, CancellationToken cancellationToken = default)
-        => ListAuctionsAsync(sellerId, page, pageSize, status, cancellationToken);
+        => ListAuctionsAsync(page, pageSize, new AuctionListFilter(Status: status, SellerId: sellerId), cancellationToken);
+
+    /// <summary>Lấy danh sách phiên đấu giá mà caller đã tham gia (gom theo từng phiên, tránh lặp theo từng lượt bid).</summary>
+    public async Task<PagedData<MyParticipatedAuctionDto>> ListMyAuctionsAsync(
+        Guid userId, int page = 1, int pageSize = 20, string? participationState = null, string? status = null,
+        CancellationToken cancellationToken = default)
+    {
+        var (safePage, safePageSize) = PaginationConstants.Normalize(page, pageSize);
+        var statusFilter = ParseStatus(status);
+        var stateFilter = participationState?.Trim().ToLowerInvariant();
+
+        if (!string.IsNullOrEmpty(stateFilter)
+            && stateFilter is not ("winning" or "outbid" or "won" or "lost"))
+        {
+            throw Invalid("VAL_INVALID_PARTICIPATION_STATE", "Participation state must be one of winning, outbid, won or lost.");
+        }
+
+        var query = _dbContext.Auctions
+            .AsNoTracking()
+            .Where(a => !a.IsDeleted && a.AuctionState != null
+                && (_dbContext.Bids.Any(b => b.AuctionId == a.Id && b.BidderId == userId && !b.IsDeleted && b.BidInvalidation == null)
+                    || _dbContext.AuctionDeposits.Any(d => d.AuctionId == a.Id && d.BidderId == userId && !d.IsDeleted)));
+
+        if (statusFilter is { } sFilter)
+            query = query.Where(a => a.AuctionState!.Status == sFilter);
+
+        if (stateFilter == "winning")
+        {
+            query = query.Where(a => a.AuctionState!.Status == AuctionStatus.Running && a.AuctionState.CurrentWinnerId == userId);
+        }
+        else if (stateFilter == "outbid")
+        {
+            query = query.Where(a => a.AuctionState!.Status == AuctionStatus.Running
+                && a.AuctionState.CurrentWinnerId != userId
+                && _dbContext.Bids.Any(b => b.AuctionId == a.Id && b.BidderId == userId && !b.IsDeleted && b.BidInvalidation == null));
+        }
+        else if (stateFilter == "won")
+        {
+            query = query.Where(a => (a.AuctionState!.Status == AuctionStatus.Ended || a.AuctionState.Status == AuctionStatus.Settled)
+                && (a.AuctionResult != null ? a.AuctionResult.WinnerId == userId : a.AuctionState.CurrentWinnerId == userId));
+        }
+        else if (stateFilter == "lost")
+        {
+            query = query.Where(a => (a.AuctionState!.Status == AuctionStatus.Ended || a.AuctionState.Status == AuctionStatus.Settled
+                    || a.AuctionState.Status == AuctionStatus.Failed || a.AuctionState.Status == AuctionStatus.Cancelled)
+                && !(a.AuctionResult != null && a.AuctionResult.WinnerId == userId)
+                && a.AuctionState.CurrentWinnerId != userId);
+        }
+
+        var totalCount = await query.CountAsync(cancellationToken);
+
+        var rows = await query
+            .OrderByDescending(a => a.AuctionState!.ScheduledEndAt)
+            .ThenBy(a => a.Id)
+            .Skip((safePage - 1) * safePageSize)
+            .Take(safePageSize)
+            .Select(a => new
+            {
+                a.Id,
+                a.ProductId,
+                a.SkuId,
+                a.SellerId,
+                a.SnapshotProductTitle,
+                a.StartPriceAmount,
+                a.ScheduledStartAt,
+                Status = a.AuctionState!.Status,
+                CurrentPriceAmount = a.AuctionState.CurrentPriceAmount,
+                CurrentWinnerId = a.AuctionState.CurrentWinnerId,
+                BidCount = a.AuctionState.BidCount,
+                ScheduledEndAt = a.AuctionState.ScheduledEndAt,
+                ResultWinnerId = a.AuctionResult != null ? a.AuctionResult.WinnerId : (Guid?)null,
+                OrderId = a.AuctionSettlement != null && a.AuctionSettlement.WinnerId == userId
+                    ? a.AuctionSettlement.OrderId
+                    : (Guid?)null,
+                MyHighestBidAmount = _dbContext.Bids
+                    .Where(b => b.AuctionId == a.Id && b.BidderId == userId && !b.IsDeleted && b.BidInvalidation == null)
+                    .Select(b => (decimal?)b.Amount)
+                    .Max(),
+                MyDepositStatus = _dbContext.AuctionDeposits
+                    .Where(d => d.AuctionId == a.Id && d.BidderId == userId && !d.IsDeleted)
+                    .Select(d => (DepositStatus?)d.Status)
+                    .FirstOrDefault()
+            })
+            .ToListAsync(cancellationToken);
+
+        var images = await TryGetMainImagesAsync(
+            rows.Where(r => r.SkuId.HasValue).Select(r => r.SkuId!.Value).Distinct().ToList(), cancellationToken);
+
+        var items = rows.Select(r =>
+        {
+            var effectiveWinnerId = r.ResultWinnerId ?? r.CurrentWinnerId;
+            var isWinning = r.Status switch
+            {
+                AuctionStatus.Running => r.CurrentWinnerId == userId,
+                AuctionStatus.Ended or AuctionStatus.Settled => effectiveWinnerId == userId,
+                _ => false
+            };
+
+            var computedState = r.Status switch
+            {
+                AuctionStatus.Running when isWinning => "Winning",
+                AuctionStatus.Running when r.MyHighestBidAmount.HasValue => "Outbid",
+                AuctionStatus.Ended or AuctionStatus.Settled when isWinning => "Won",
+                AuctionStatus.Ended or AuctionStatus.Settled or AuctionStatus.Failed or AuctionStatus.Cancelled => "Lost",
+                _ => "Pending"
+            };
+
+            return new MyParticipatedAuctionDto(
+                r.Id,
+                r.ProductId,
+                r.SkuId,
+                r.SellerId,
+                r.SnapshotProductTitle,
+                r.SkuId is { } skuId && images.TryGetValue(skuId, out var imageUrl) ? imageUrl : null,
+                r.Status,
+                r.StartPriceAmount,
+                r.CurrentPriceAmount,
+                r.MyHighestBidAmount,
+                isWinning,
+                computedState,
+                r.MyDepositStatus,
+                r.OrderId,
+                r.BidCount,
+                r.ScheduledStartAt,
+                r.ScheduledEndAt);
+        }).ToList();
+
+        return new PagedData<MyParticipatedAuctionDto>(items, PaginationMetadata.Create(safePage, safePageSize, totalCount));
+    }
+
+    /// <summary>Admin/Staff xem danh sách phiên đấu giá toàn sàn với các bộ lọc phục vụ vận hành.</summary>
+    public async Task<PagedData<AdminAuctionSummaryDto>> ListAdminAuctionsAsync(
+        int page = 1, int pageSize = 20, string? status = null, Guid? sellerId = null, Guid? productId = null,
+        bool? hasAttentionDeposit = null, bool? overdueSettlement = null, DateTimeOffset? fromDate = null, DateTimeOffset? toDate = null,
+        CancellationToken cancellationToken = default)
+    {
+        var (safePage, safePageSize) = PaginationConstants.Normalize(page, pageSize);
+        var statusFilter = ParseStatus(status);
+        var now = _clock.GetUtcNow();
+
+        var query = _dbContext.Auctions
+            .AsNoTracking()
+            .Where(a => !a.IsDeleted && a.AuctionState != null);
+
+        if (statusFilter is { } filter)
+            query = query.Where(a => a.AuctionState!.Status == filter);
+        if (sellerId is { } sId && sId != Guid.Empty)
+            query = query.Where(a => a.SellerId == sId);
+        if (productId is { } pId && pId != Guid.Empty)
+            query = query.Where(a => a.ProductId == pId);
+        if (fromDate is { } from)
+            query = query.Where(a => a.CreatedAt >= from);
+        if (toDate is { } to)
+            query = query.Where(a => a.CreatedAt <= to);
+
+        if (hasAttentionDeposit is true)
+        {
+            query = query.Where(a => _dbContext.AuctionDeposits.Any(
+                d => d.AuctionId == a.Id && !d.IsDeleted && (d.NeedsAttention || d.ActionFailureCount > 10)));
+        }
+        else if (hasAttentionDeposit is false)
+        {
+            query = query.Where(a => !_dbContext.AuctionDeposits.Any(
+                d => d.AuctionId == a.Id && !d.IsDeleted && (d.NeedsAttention || d.ActionFailureCount > 10)));
+        }
+
+        if (overdueSettlement is true)
+        {
+            query = query.Where(a => a.AuctionState!.Status == AuctionStatus.Ended
+                && a.AuctionSettlement != null
+                && a.AuctionSettlement.Status == AuctionSettlementStatus.PendingPayment
+                && a.AuctionSettlement.PaymentDeadlineAt <= now);
+        }
+        else if (overdueSettlement is false)
+        {
+            query = query.Where(a => !(a.AuctionState!.Status == AuctionStatus.Ended
+                && a.AuctionSettlement != null
+                && a.AuctionSettlement.Status == AuctionSettlementStatus.PendingPayment
+                && a.AuctionSettlement.PaymentDeadlineAt <= now));
+        }
+
+        var totalCount = await query.CountAsync(cancellationToken);
+
+        var items = await query
+            .OrderByDescending(a => a.CreatedAt)
+            .ThenBy(a => a.Id)
+            .Skip((safePage - 1) * safePageSize)
+            .Take(safePageSize)
+            .Select(a => new AdminAuctionSummaryDto(
+                a.Id,
+                a.ProductId,
+                a.SkuId,
+                a.SellerId,
+                a.SnapshotProductTitle,
+                a.AuctionState!.Status,
+                a.StartPriceAmount,
+                a.AuctionState.CurrentPriceAmount,
+                a.AuctionState.BidCount,
+                a.ScheduledStartAt,
+                a.AuctionState.ScheduledEndAt,
+                _dbContext.AuctionDeposits.Any(d => d.AuctionId == a.Id && !d.IsDeleted && (d.NeedsAttention || d.ActionFailureCount > 10)),
+                a.AuctionState.Status == AuctionStatus.Ended
+                    && a.AuctionSettlement != null
+                    && a.AuctionSettlement.Status == AuctionSettlementStatus.PendingPayment
+                    && a.AuctionSettlement.PaymentDeadlineAt <= now,
+                a.NeedsAttention,
+                a.CreatedAt))
+            .ToListAsync(cancellationToken);
+
+        return new PagedData<AdminAuctionSummaryDto>(items, PaginationMetadata.Create(safePage, safePageSize, totalCount));
+    }
+
+    /// <summary>Admin/Staff xem danh sách các phiên đang bị kẹt lỗi cọc, đồng bộ hoặc quá hạn settlement.</summary>
+    public async Task<PagedData<AdminAuctionSummaryDto>> ListAttentionRequiredAuctionsAsync(
+        int page = 1, int pageSize = 20, CancellationToken cancellationToken = default)
+    {
+        var (safePage, safePageSize) = PaginationConstants.Normalize(page, pageSize);
+        var now = _clock.GetUtcNow();
+
+        var query = _dbContext.Auctions
+            .AsNoTracking()
+            .Where(a => !a.IsDeleted && a.AuctionState != null
+                && (a.NeedsAttention
+                    || _dbContext.AuctionDeposits.Any(d => d.AuctionId == a.Id && !d.IsDeleted && (d.NeedsAttention || d.ActionFailureCount > 10))
+                    || (a.AuctionState.Status == AuctionStatus.Ended
+                        && a.AuctionSettlement != null
+                        && a.AuctionSettlement.Status == AuctionSettlementStatus.PendingPayment
+                        && a.AuctionSettlement.PaymentDeadlineAt <= now)));
+
+        var totalCount = await query.CountAsync(cancellationToken);
+
+        var items = await query
+            .OrderByDescending(a => a.UpdatedAt)
+            .ThenBy(a => a.Id)
+            .Skip((safePage - 1) * safePageSize)
+            .Take(safePageSize)
+            .Select(a => new AdminAuctionSummaryDto(
+                a.Id,
+                a.ProductId,
+                a.SkuId,
+                a.SellerId,
+                a.SnapshotProductTitle,
+                a.AuctionState!.Status,
+                a.StartPriceAmount,
+                a.AuctionState.CurrentPriceAmount,
+                a.AuctionState.BidCount,
+                a.ScheduledStartAt,
+                a.AuctionState.ScheduledEndAt,
+                _dbContext.AuctionDeposits.Any(d => d.AuctionId == a.Id && !d.IsDeleted && (d.NeedsAttention || d.ActionFailureCount > 10)),
+                a.AuctionState.Status == AuctionStatus.Ended
+                    && a.AuctionSettlement != null
+                    && a.AuctionSettlement.Status == AuctionSettlementStatus.PendingPayment
+                    && a.AuctionSettlement.PaymentDeadlineAt <= now,
+                a.NeedsAttention,
+                a.CreatedAt))
+            .ToListAsync(cancellationToken);
+
+        return new PagedData<AdminAuctionSummaryDto>(items, PaginationMetadata.Create(safePage, safePageSize, totalCount));
+    }
+
+    /// <summary>Admin/Staff kích hoạt chạy lại đồng bộ Catalog / Commerce / User cho một phiên bị kẹt.</summary>
+    public async Task<AdminSyncRetryResponse> RetrySyncAsync(
+        ActorContext actor, Guid auctionId, CancellationToken cancellationToken = default)
+    {
+        if (auctionId == Guid.Empty)
+            throw Invalid("VAL_INVALID_IDENTIFIER", "Auction ID is required.");
+
+        var auction = await _dbContext.Auctions
+            .Include(a => a.AuctionState)
+            .Include(a => a.AuctionSettlement)
+            .FirstOrDefaultAsync(a => a.Id == auctionId && !a.IsDeleted, cancellationToken);
+        if (auction?.AuctionState is null)
+            throw NotFound(auctionId);
+
+        var now = _clock.GetUtcNow();
+        var resetFlags = 0;
+
+        if (auction.NeedsAttention)
+        {
+            auction.NeedsAttention = false;
+            resetFlags++;
+        }
+
+        if (auction.ViolationState == BackgroundSyncState.Pending
+            || auction.StreakResetState == BackgroundSyncState.Pending
+            || auction.StockReleaseState == BackgroundSyncState.Pending)
+        {
+            auction.NextRetryAt = now;
+            auction.LastError = null;
+            auction.UpdatedAt = now;
+            resetFlags++;
+        }
+
+        var pushedCommerce = false;
+        if (auction.AuctionState.Status == AuctionStatus.Ended
+            && auction.AuctionSettlement is { Status: AuctionSettlementStatus.PendingPayment, OrderId: null })
+        {
+            pushedCommerce = true;
+        }
+
+        var pushedCatalogUnlock = auction.StockReleaseState == BackgroundSyncState.Pending
+            && auction.AuctionState.Status is AuctionStatus.Failed or AuctionStatus.Cancelled;
+
+        if (resetFlags > 0)
+        {
+            _dbContext.AddAuditLog(
+                AuditAction.AuctionUpdate, "Auction", auctionId.ToString(),
+                oldValues: null,
+                newValues: new { action = "AdminSyncRetry", pushedCommerce, pushedCatalogUnlock },
+                userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+            await SaveAsync(null, cancellationToken);
+        }
+
+        if (pushedCommerce)
+            _commerceSync.PushSettlement(auctionId);
+        if (pushedCatalogUnlock)
+            _catalogSync.UnlockProduct(auction.ProductId, auctionId);
+
+        return new AdminSyncRetryResponse(auctionId, pushedCommerce, pushedCatalogUnlock, resetFlags, now);
+    }
+
+    /// <summary>Admin/Staff vô hiệu hoá một lượt bid gian lận khi phiên đang chạy và tính lại giá dẫn đầu.</summary>
+    public async Task<InvalidateBidResponse> InvalidateBidAsync(
+        ActorContext actor, Guid auctionId, Guid bidId, InvalidateBidRequest? request, CancellationToken cancellationToken = default)
+    {
+        if (auctionId == Guid.Empty || bidId == Guid.Empty)
+            throw Invalid("VAL_INVALID_IDENTIFIER", "Auction ID and Bid ID are required.");
+
+        var now = _clock.GetUtcNow();
+        var auction = await _dbContext.Auctions
+            .Include(a => a.AuctionState)
+            .FirstOrDefaultAsync(a => a.Id == auctionId && !a.IsDeleted, cancellationToken);
+        if (auction?.AuctionState is null)
+            throw NotFound(auctionId);
+
+        var state = auction.AuctionState;
+        if (state.Status != AuctionStatus.Running)
+            throw new BusinessRuleValidationException(
+                "INVALID_STATE_TRANSITION", "Only bids in a running auction can be invalidated.", 422);
+
+        var bid = await _dbContext.Bids
+            .Include(b => b.BidInvalidation)
+            .FirstOrDefaultAsync(b => b.Id == bidId && b.AuctionId == auctionId && !b.IsDeleted, cancellationToken);
+        if (bid is null)
+            throw new EntityNotFoundException("BID_NOT_FOUND", "Bid", bidId);
+
+        if (bid.BidInvalidation is not null)
+        {
+            return new InvalidateBidResponse(
+                auctionId, bidId, bid.BidInvalidation.Reason,
+                state.CurrentPriceAmount, state.CurrentWinnerId, state.BidCount, bid.BidInvalidation.InvalidatedAt);
+        }
+
+        var reason = BidInvalidationReason.BidderBanned;
+        var note = string.IsNullOrWhiteSpace(request?.Reason) ? "Invalidated by admin/staff." : request.Reason.Trim();
+
+        _dbContext.BidInvalidations.Add(new BidInvalidation
+        {
+            Id = Guid.NewGuid(),
+            BidId = bidId,
+            Reason = reason,
+            InvalidatedAt = now,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+
+        var histories = await _dbContext.BidHistories
+            .Where(h => h.BidId == bidId && !h.IsDeleted)
+            .ToListAsync(cancellationToken);
+        foreach (var history in histories)
+        {
+            history.IsInvalidated = true;
+            history.UpdatedAt = now;
+        }
+
+        var remainingTop = await _dbContext.Bids
+            .AsNoTracking()
+            .Where(b => b.AuctionId == auctionId && b.Id != bidId && !b.IsDeleted && b.BidInvalidation == null)
+            .OrderByDescending(b => b.Amount)
+            .ThenBy(b => b.BidSeq)
+            .Select(b => new { b.BidderId, b.Amount })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        var remainingCount = await _dbContext.Bids
+            .AsNoTracking()
+            .CountAsync(b => b.AuctionId == auctionId && b.Id != bidId && !b.IsDeleted && b.BidInvalidation == null, cancellationToken);
+
+        var oldValues = new
+        {
+            currentPriceAmount = state.CurrentPriceAmount,
+            currentWinnerId = state.CurrentWinnerId,
+            bidCount = state.BidCount
+        };
+
+        state.CurrentPriceAmount = remainingTop?.Amount;
+        state.CurrentWinnerId = remainingTop?.BidderId;
+        state.BidCount = remainingCount;
+        state.UpdatedAt = now;
+        state.RowVersion += 1;
+
+        _dbContext.AddAuditLog(
+            AuditAction.BidInvalidate, "Bid", bidId.ToString(),
+            oldValues: oldValues,
+            newValues: new
+            {
+                auctionId,
+                bidId,
+                reason = reason.ToString(),
+                note,
+                currentPriceAmount = state.CurrentPriceAmount,
+                currentWinnerId = state.CurrentWinnerId,
+                bidCount = state.BidCount
+            },
+            userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+
+        await SaveAsync(null, cancellationToken);
+
+        await _notifier.AuctionStatusChangedAsync(
+            auctionId, new AuctionStatusChangedMessage(auctionId, state.Status.ToString(), now), CancellationToken.None);
+
+        return new InvalidateBidResponse(
+            auctionId, bidId, reason, state.CurrentPriceAmount, state.CurrentWinnerId, state.BidCount, now);
+    }
 
     /// <summary>Lấy số liệu thống kê các phiên thành công và thất bại của seller.</summary>
     public async Task<SellerAuctionStatisticsDto> GetSellerAuctionStatisticsAsync(
@@ -872,6 +1294,27 @@ public sealed class AuctionService : IAuctionService
             UpdatedAt = now
         });
 
+        // Queue outbox notifications before SaveAsync so they commit atomically with the settlement state.
+        if (paymentStatus == SettlementPaymentStatus.Paid && result.WinningBidId is { } paidBidId)
+        {
+            _notifications.NotifyAuctionOrderPaid(new AuctionOrderPaidNotification(
+                auctionId, result.Id, paidBidId, orderId, winnerId, auction.SellerId,
+                auction.AuctionSettlement?.PaidAt ?? request.PaidAt ?? now, state.Status.ToString(),
+                request.OrderNo, request.TotalAmount, request.SellerRespondDeadlineAt, null));
+        }
+        else if (offer is null && state.Status == AuctionStatus.Failed)
+        {
+            _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+                auctionId, auction.SellerId, auction.SnapshotProductTitle,
+                $"Commerce payment status: {paymentStatus}.", now, null));
+        }
+        else if (offer is not null)
+        {
+            _notifications.NotifyReplacementWinnerOffer(new ReplacementWinnerOfferNotification(
+                auctionId, offer.Id, offer.BidId, offer.BidderId, winnerId, auction.SellerId,
+                auction.SnapshotProductTitle, offer.Amount, offer.OfferedAt, offer.ExpiresAt, null));
+        }
+
         await SaveAsync(null, cancellationToken);
 
         // Fast-path sau commit: thực thi việc nền cọc (Capture OrderPayment / Forfeit) và gọi User API 20 / API 25.
@@ -898,19 +1341,6 @@ public sealed class AuctionService : IAuctionService
 
             await _notifier.AuctionStatusChangedAsync(
                 auctionId, new AuctionStatusChangedMessage(auctionId, state.Status.ToString(), now), CancellationToken.None);
-
-            if (state.Status == AuctionStatus.Failed)
-            {
-                _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
-                    auctionId, auction.SellerId, auction.SnapshotProductTitle,
-                    $"Commerce payment status: {paymentStatus}.", now, null));
-            }
-        }
-        else
-        {
-            _notifications.NotifyReplacementWinnerOffer(new ReplacementWinnerOfferNotification(
-                auctionId, offer.Id, offer.BidId, offer.BidderId, winnerId, auction.SellerId,
-                auction.SnapshotProductTitle, offer.Amount, offer.OfferedAt, offer.ExpiresAt, null));
         }
 
         return response;
@@ -1055,6 +1485,19 @@ public sealed class AuctionService : IAuctionService
             UpdatedAt = now
         });
 
+        if (decision != SettlementPaymentStatus.SellerAccepted)
+        {
+            _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+                auctionId, auction.SellerId, auction.SnapshotProductTitle,
+                decision switch
+                {
+                    SettlementPaymentStatus.SellerRejected => "The seller rejected the order.",
+                    SettlementPaymentStatus.SellerExpired => "The seller did not respond to the order in time.",
+                    _ => "The order was cancelled after payment."
+                },
+                now, null));
+        }
+
         await SaveAsync(null, cancellationToken);
 
         await _deposits.ProcessDueDepositRetriesAsync(10, cancellationToken);
@@ -1076,15 +1519,6 @@ public sealed class AuctionService : IAuctionService
             else
                 _catalogSync.UnlockProduct(auction.ProductId, auctionId);
 
-            _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
-                auctionId, auction.SellerId, auction.SnapshotProductTitle,
-                decision switch
-                {
-                    SettlementPaymentStatus.SellerRejected => "The seller rejected the order.",
-                    SettlementPaymentStatus.SellerExpired => "The seller did not respond to the order in time.",
-                    _ => "The order was cancelled after payment."
-                },
-                now, null));
             await _notifier.AuctionStatusChangedAsync(
                 auctionId, new AuctionStatusChangedMessage(auctionId, state.Status.ToString(), now), CancellationToken.None);
         }
@@ -1178,26 +1612,66 @@ public sealed class AuctionService : IAuctionService
     /// rồi lấy ảnh chính từ Catalog. Catalog lỗi chỉ làm thiếu ảnh, không làm hỏng danh sách.
     /// </summary>
     private async Task<PagedData<AuctionSummaryDto>> ListAuctionsAsync(
-        Guid? sellerId, int page, int pageSize, string? status, CancellationToken cancellationToken)
+        int page, int pageSize, AuctionListFilter listFilter, CancellationToken cancellationToken)
     {
         var (safePage, safePageSize) = PaginationConstants.Normalize(page, pageSize);
-        var statusFilter = ParseStatus(status);
+        var statusFilter = ParseStatus(listFilter.Status);
+
+        if (listFilter.MinPrice is < 0m || listFilter.MaxPrice is < 0m)
+            throw Invalid("VAL_INVALID_PRICE", "Price filter must be zero or greater.");
+        if (listFilter.MinPrice is { } min && listFilter.MaxPrice is { } max && min > max)
+            throw Invalid("VAL_INVALID_PRICE", "Minimum price cannot be greater than maximum price.");
+        if (listFilter.EndingWithinMinutes is <= 0)
+            throw Invalid("VAL_INVALID_SCHEDULE", "EndingWithinMinutes must be greater than zero.");
 
         var query = _dbContext.Auctions
             .AsNoTracking()
             .Where(a => !a.IsDeleted && a.AuctionState != null);
 
-        if (sellerId is { } owner)
+        if (listFilter.SellerId is { } owner && owner != Guid.Empty)
             query = query.Where(a => a.SellerId == owner);
+
+        if (listFilter.ProductId is { } productId && productId != Guid.Empty)
+            query = query.Where(a => a.ProductId == productId);
 
         if (statusFilter is { } filter)
             query = query.Where(a => a.AuctionState!.Status == filter);
 
+        if (!string.IsNullOrWhiteSpace(listFilter.Keyword))
+        {
+            var kw = listFilter.Keyword.Trim().ToLowerInvariant();
+            query = query.Where(a => a.SnapshotProductTitle != null && a.SnapshotProductTitle.ToLower().Contains(kw));
+        }
+
+        if (listFilter.MinPrice is { } minPrice)
+            query = query.Where(a => (a.AuctionState!.CurrentPriceAmount ?? a.StartPriceAmount) >= minPrice);
+
+        if (listFilter.MaxPrice is { } maxPrice)
+            query = query.Where(a => (a.AuctionState!.CurrentPriceAmount ?? a.StartPriceAmount) <= maxPrice);
+
+        if (listFilter.EndingWithinMinutes is { } minutes)
+        {
+            var now = _clock.GetUtcNow();
+            var cutoff = now.AddMinutes(minutes);
+            query = query.Where(a => a.AuctionState!.Status == AuctionStatus.Running
+                && a.AuctionState.ScheduledEndAt > now
+                && a.AuctionState.ScheduledEndAt <= cutoff);
+        }
+
         var totalCount = await query.CountAsync(cancellationToken);
 
-        var rows = await query
-            .OrderByDescending(a => a.ScheduledStartAt)
-            .ThenBy(a => a.Id)
+        var sortKey = listFilter.SortBy?.Trim().ToLowerInvariant();
+        IOrderedQueryable<AuctionEntity> ordered = sortKey switch
+        {
+            "endingsoon" => query.OrderBy(a => a.AuctionState!.ScheduledEndAt).ThenBy(a => a.Id),
+            "newest" => query.OrderByDescending(a => a.CreatedAt).ThenBy(a => a.Id),
+            "priceasc" => query.OrderBy(a => a.AuctionState!.CurrentPriceAmount ?? a.StartPriceAmount).ThenBy(a => a.Id),
+            "pricedesc" => query.OrderByDescending(a => a.AuctionState!.CurrentPriceAmount ?? a.StartPriceAmount).ThenBy(a => a.Id),
+            "mostbids" => query.OrderByDescending(a => a.AuctionState!.BidCount).ThenBy(a => a.Id),
+            _ => query.OrderByDescending(a => a.ScheduledStartAt).ThenBy(a => a.Id)
+        };
+
+        var rows = await ordered
             .Skip((safePage - 1) * safePageSize)
             .Take(safePageSize)
             .Select(a => new
@@ -1485,6 +1959,9 @@ public sealed class AuctionService : IAuctionService
             changedColumns: new[] { "status" },
             userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
 
+        _notifications.NotifyAuctionCancelled(new AuctionCancelledNotification(
+            auction.Id, auction.SellerId, auction.SnapshotProductTitle, reason, now, false, actor.TraceId));
+
         await SaveAsync(null, cancellationToken);
 
         // Giải phóng cọc ngay sau commit (fast path); lỗi mạng giữ ReleasePending = true để retry sau.
@@ -1497,8 +1974,6 @@ public sealed class AuctionService : IAuctionService
         // Báo cho người đang xem phiên để họ dừng đặt giá.
         await _notifier.AuctionCancelledAsync(
             auction.Id, new AuctionCancelledMessage(auction.Id, now), CancellationToken.None);
-        _notifications.NotifyAuctionCancelled(new AuctionCancelledNotification(
-            auction.Id, auction.SellerId, auction.SnapshotProductTitle, reason, now, false, actor.TraceId));
 
         return new AuctionCancelledResponse(auction.Id, fromStatus, state.Status, reason, now, depositsToRelease, "QUEUED");
     }
@@ -1570,6 +2045,9 @@ public sealed class AuctionService : IAuctionService
             changedColumns: new[] { "status" },
             userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
 
+        _notifications.NotifyAuctionCancelled(new AuctionCancelledNotification(
+            auction.Id, auction.SellerId, auction.SnapshotProductTitle, reason, now, true, actor.TraceId));
+
         await SaveAsync(null, cancellationToken);
 
         // Giải phóng cọc ngay sau commit (fast path); lỗi mạng giữ ReleasePending = true để retry sau.
@@ -1582,8 +2060,6 @@ public sealed class AuctionService : IAuctionService
         // Báo cho người đang xem phiên để họ dừng đặt giá. Không trừ uy tín seller.
         await _notifier.AuctionCancelledAsync(
             auction.Id, new AuctionCancelledMessage(auction.Id, now), CancellationToken.None);
-        _notifications.NotifyAuctionCancelled(new AuctionCancelledNotification(
-            auction.Id, auction.SellerId, auction.SnapshotProductTitle, reason, now, true, actor.TraceId));
 
         return new AuctionCancelledResponse(auction.Id, fromStatus, state.Status, reason, now, depositsToRelease, "QUEUED");
     }
@@ -1803,6 +2279,10 @@ public sealed class AuctionService : IAuctionService
             newValues: new { status = AuctionStatus.Failed.ToString(), offerId, offerStatus = AuctionWinnerOfferStatus.Declined.ToString(), reason = offer.ResponseReason },
             userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
 
+        _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+            auctionId, auction.SellerId, auction.SnapshotProductTitle,
+            "The invited replacement bidder declined the winner offer.", now, actor.TraceId));
+
         await SaveAsync(null, cancellationToken);
 
         if (depositsToRelease > 0)
@@ -1810,10 +2290,6 @@ public sealed class AuctionService : IAuctionService
 
         // Đã lưu: mở khoá sản phẩm ở Catalog (gửi nền, có thử lại), rồi báo cho người đang xem phiên rằng phiên đã chuyển sang Failed.
         _catalogSync.UnlockProduct(auction.ProductId, auctionId);
-
-        _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
-            auctionId, auction.SellerId, auction.SnapshotProductTitle,
-            "The invited replacement bidder declined the winner offer.", now, actor.TraceId));
 
         await _notifier.AuctionStatusChangedAsync(
             auctionId, new AuctionStatusChangedMessage(auctionId, state.Status.ToString(), now), CancellationToken.None);
@@ -2118,16 +2594,16 @@ public sealed class AuctionService : IAuctionService
             newValues: new { status = AuctionStatus.Failed.ToString(), offerId = offer.Id, offerStatus = AuctionWinnerOfferStatus.Declined.ToString(), reason = offer.ResponseReason },
             userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
 
+        _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+            auctionId, auction.SellerId, auction.SnapshotProductTitle,
+            "The invited second-chance bidder declined the offer.", now, actor.TraceId));
+
         await SaveAsync(null, cancellationToken);
 
         if (depositsToRelease > 0)
             await _deposits.ReleasePendingDepositsForAuctionAsync(auctionId, cancellationToken);
 
         _catalogSync.UnlockProduct(auction.ProductId, auctionId);
-
-        _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
-            auctionId, auction.SellerId, auction.SnapshotProductTitle,
-            "The invited second-chance bidder declined the offer.", now, actor.TraceId));
 
         await _notifier.AuctionStatusChangedAsync(
             auctionId, new AuctionStatusChangedMessage(auctionId, state.Status.ToString(), now), CancellationToken.None);
@@ -2638,6 +3114,15 @@ public sealed class AuctionService : IAuctionService
             request.Status?.ToString(),
             request.Amount?.ToString("0.00", CultureInfo.InvariantCulture),
             request.PaidAt?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
+
+        if (request.OrderNo is not null || request.TotalAmount is not null || request.SellerRespondDeadlineAt is not null)
+        {
+            text += "|v2|" + string.Join('|',
+                request.OrderNo,
+                request.TotalAmount?.ToString("0.00", CultureInfo.InvariantCulture),
+                request.SellerRespondDeadlineAt?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
+        }
+
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
     }
 
@@ -2791,17 +3276,12 @@ public sealed class AuctionService : IAuctionService
         var now = _clock.GetUtcNow();
         try
         {
-            // The User service requires 0 for second-chance non-payment because that deposit is released, not forfeited.
-            var depositForfeitedAmount = 0m;
-            if (!isSecondChance)
-            {
-                var deposit = await _dbContext.AuctionDeposits
-                    .AsNoTracking()
-                    .Where(d => d.AuctionId == auction.Id && d.BidderId == buyerId && !d.IsDeleted)
-                    .Select(d => (decimal?)d.Amount)
-                    .FirstOrDefaultAsync(cancellationToken);
-                depositForfeitedAmount = deposit ?? 0m;
-            }
+            var deposit = await _dbContext.AuctionDeposits
+                .AsNoTracking()
+                .Where(d => d.AuctionId == auction.Id && d.BidderId == buyerId && !d.IsDeleted)
+                .Select(d => (decimal?)d.Amount)
+                .FirstOrDefaultAsync(cancellationToken);
+            var depositForfeitedAmount = deposit ?? 0m;
 
             var violationType = isSecondChance ? "SecondChanceNonPayment" : "WinnerNonPayment";
             await _users.RecordAuctionViolationAsync(

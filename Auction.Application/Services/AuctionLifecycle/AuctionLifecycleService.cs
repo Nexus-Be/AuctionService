@@ -307,6 +307,18 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
                 newValues: new { depositId = deposit.Id, status = deposit.Status, releaseReason, releasePending = deposit.ReleasePending });
         }
 
+        // Queue outbox notification before TrySaveAsync so it commits atomically with the auction result.
+        if (winnerNotice is not null)
+        {
+            _notifications.NotifyAuctionWinner(winnerNotice);
+        }
+        else
+        {
+            _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+                auctionId, auction.SellerId, auction.SnapshotProductTitle,
+                "Auction ended without a valid bid.", now, null));
+        }
+
         if (!await TrySaveAsync(cancellationToken))
             return false;
 
@@ -316,21 +328,14 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
         await _notifier.AuctionStatusChangedAsync(
             auctionId, new AuctionStatusChangedMessage(auctionId, toStatus.ToString(), now), CancellationToken.None);
 
-        // Báo cho người thắng qua Notification service (gửi nền, không chờ, lỗi chỉ ghi log).
-        // Phiên không có bid hợp lệ thì phiên Failed: mở khoá sản phẩm ở Catalog (gửi nền, có thử lại).
+        // Đã lưu: đẩy settlement sang Commerce nếu có người thắng, hoặc mở khoá sản phẩm ở Catalog nếu không có bid hợp lệ.
         if (winnerNotice is not null)
         {
-            _notifications.NotifyAuctionWinner(winnerNotice);
-
-            // Đẩy settlement sang Commerce để tạo đơn cho người thắng (gửi nền, có thử lại).
             _commerceSync.PushSettlement(auctionId);
         }
         else
         {
             _catalogSync.UnlockProduct(auction.ProductId, auctionId);
-            _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
-                auctionId, auction.SellerId, auction.SnapshotProductTitle,
-                "Auction ended without a valid bid.", now, null));
         }
 
         return true;
@@ -442,6 +447,13 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
                 status = state?.Status.ToString()
             });
 
+        if (failAuction)
+        {
+            _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+                offer.AuctionId, auction!.SellerId, auction.SnapshotProductTitle,
+                "The replacement winner offer expired without an answer.", now, null));
+        }
+
         if (!await TrySaveAsync(cancellationToken))
             return false;
 
@@ -452,9 +464,6 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
 
             // Đã lưu: mở khoá sản phẩm ở Catalog (gửi nền, có thử lại), rồi báo realtime phiên đã Failed.
             _catalogSync.UnlockProduct(auction!.ProductId, offer.AuctionId);
-            _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
-                offer.AuctionId, auction.SellerId, auction.SnapshotProductTitle,
-                "The replacement winner offer expired without an answer.", now, null));
 
             await _notifier.AuctionStatusChangedAsync(
                 offer.AuctionId, new AuctionStatusChangedMessage(offer.AuctionId, AuctionStatus.Failed.ToString(), now), CancellationToken.None);
@@ -539,17 +548,12 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             {
                 try
                 {
-                    // Second-chance non-payment forfeits nothing (the deposit is released), and the User service requires 0 for it.
-                    var forfeited = 0m;
-                    if (!violationIsSecondChance)
-                    {
-                        var depAmount = await _dbContext.AuctionDeposits
-                            .AsNoTracking()
-                            .Where(d => d.AuctionId == auction.Id && d.BidderId == violationBuyerId.Value && !d.IsDeleted)
-                            .Select(d => (decimal?)d.Amount)
-                            .FirstOrDefaultAsync(cancellationToken);
-                        forfeited = depAmount ?? 0m;
-                    }
+                    var depAmount = await _dbContext.AuctionDeposits
+                        .AsNoTracking()
+                        .Where(d => d.AuctionId == auction.Id && d.BidderId == violationBuyerId.Value && !d.IsDeleted)
+                        .Select(d => (decimal?)d.Amount)
+                        .FirstOrDefaultAsync(cancellationToken);
+                    var forfeited = depAmount ?? 0m;
 
                     var violationType = violationIsSecondChance ? "SecondChanceNonPayment" : "WinnerNonPayment";
                     await _users.RecordAuctionViolationAsync(
@@ -708,6 +712,10 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
         }
         catch (DbUpdateConcurrencyException)
         {
+            // Drop any unsaved outbox rows so a retry or later SaveChanges on the same context does not duplicate them.
+            var unsavedOutbox = _dbContext.NotificationOutbox.Local.ToList();
+            if (unsavedOutbox.Count > 0)
+                _dbContext.NotificationOutbox.RemoveRange(unsavedOutbox);
             return false;
         }
     }

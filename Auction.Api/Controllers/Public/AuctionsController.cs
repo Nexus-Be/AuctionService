@@ -22,17 +22,43 @@ public class AuctionsController : ControllerBase
         _auctionService = auctionService;
     }
 
-    /// <summary>Lists auctions (newest start time first) with pagination and an optional status filter.</summary>
+    /// <summary>Lists auctions with pagination, search, filters and sorting.</summary>
     [HttpGet]
     [ProducesResponseType(typeof(PagedData<AuctionSummaryDto>), StatusCodes.Status200OK)]
     public async Task<ActionResult<PagedData<AuctionSummaryDto>>> ListActive(
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
         [FromQuery] string? status = null,
+        [FromQuery] string? keyword = null,
+        [FromQuery] Guid? sellerId = null,
+        [FromQuery] Guid? productId = null,
+        [FromQuery] decimal? minPrice = null,
+        [FromQuery] decimal? maxPrice = null,
+        [FromQuery] int? endingWithinMinutes = null,
+        [FromQuery] string? sortBy = null,
         CancellationToken ct = default)
     {
-        var auctions = await _auctionService.ListActiveAuctionsAsync(page, pageSize, status, ct);
+        var filter = new AuctionListFilter(status, keyword, sellerId, productId, minPrice, maxPrice, endingWithinMinutes, sortBy);
+        var auctions = await _auctionService.ListActiveAuctionsAsync(page, pageSize, filter, ct);
         return Ok(auctions);
+    }
+
+    /// <summary>Buyer views all auctions they participated in, grouped one row per auction.</summary>
+    [HttpGet("~/api/v1/me/auctions")]
+    [ProducesResponseType(typeof(PagedData<MyParticipatedAuctionDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListMyAuctions(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        [FromQuery] string? participationState = null,
+        [FromQuery] string? status = null,
+        CancellationToken ct = default)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("buyer") && !this.HasRole("seller"))
+            return this.ForbiddenError("Only buyer or seller accounts can view participated auctions.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.ListMyAuctionsAsync(userId, page, pageSize, participationState, status, ct);
+        return Ok(result);
     }
 
     /// <summary>Gets auction details by ID.</summary>
@@ -132,27 +158,6 @@ public class AuctionsController : ControllerBase
             return this.ForbiddenError("Only buyer or seller accounts can view second-chance offers.", "ROLE_NOT_ALLOWED");
 
         var result = await _auctionService.GetMySecondChanceOfferAsync(id, userId, ct);
-        return Ok(result);
-    }
-
-    /// <summary>Catalog gets the latest auction status of a product.</summary>
-    [HttpGet("~/internal/v1/auctions/status")]
-    [ProducesResponseType(typeof(ProductAuctionStatusDto), StatusCodes.Status200OK)]
-    public async Task<IActionResult> GetProductAuctionStatus([FromQuery] Guid productId, CancellationToken ct)
-    {
-        if (productId == Guid.Empty)
-            return this.BadRequestError("VAL_INVALID_INPUT", "Product ID is required.");
-
-        var result = await _auctionService.GetProductAuctionStatusAsync(productId, ct);
-        return Ok(result);
-    }
-
-    /// <summary>Catalog gets the price and leading bidder summary of an auction.</summary>
-    [HttpGet("~/internal/v1/auctions/{auctionId}/summary")]
-    [ProducesResponseType(typeof(AuctionInternalSummaryDto), StatusCodes.Status200OK)]
-    public async Task<IActionResult> GetInternalSummary([FromRoute] Guid auctionId, CancellationToken ct)
-    {
-        var result = await _auctionService.GetInternalSummaryAsync(auctionId, ct);
         return Ok(result);
     }
 
@@ -268,62 +273,100 @@ public class AuctionsController : ControllerBase
         return Ok(result);
     }
 
-    /// <summary>Commerce lấy thông tin chốt kết quả của một phiên để tạo order (sản phẩm, SKU, seller, người thắng, giá chốt, hạn thanh toán).</summary>
-    [HttpGet("{id:guid}/settlement")]
-    [ProducesResponseType(typeof(AuctionSettlementDto), StatusCodes.Status200OK)]
-    public async Task<ActionResult<AuctionSettlementDto>> GetSettlement([FromRoute] Guid id, CancellationToken ct)
-    {
-        var result = await _auctionService.GetSettlementAsync(id, ct);
-        return Ok(result);
-    }
-
-    /// <summary>Commerce lấy danh sách phiên đã chốt người thắng (cũ nhất trước) để quét và tạo order. Lọc theo status (ví dụ PendingPayment) và determinedFrom.</summary>
-    [HttpGet("~/api/v1/auction-settlements")]
-    [ProducesResponseType(typeof(PagedData<AuctionSettlementDto>), StatusCodes.Status200OK)]
-    public async Task<IActionResult> ListSettlements(
+    /// <summary>Admin or Staff lists all auctions with operational filters.</summary>
+    [HttpGet("~/api/v1/admin/auctions")]
+    [ProducesResponseType(typeof(PagedData<AdminAuctionSummaryDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListAdminAuctions(
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
         [FromQuery] string? status = null,
-        [FromQuery] DateTimeOffset? determinedFrom = null,
+        [FromQuery] Guid? sellerId = null,
+        [FromQuery] Guid? productId = null,
+        [FromQuery] bool? hasAttentionDeposit = null,
+        [FromQuery] bool? overdueSettlement = null,
+        [FromQuery] DateTimeOffset? fromDate = null,
+        [FromQuery] DateTimeOffset? toDate = null,
         CancellationToken ct = default)
     {
-        var result = await _auctionService.ListSettlementsAsync(page, pageSize, status, determinedFrom, ct);
+        if (!this.TryGetUserId(out _, out var errorResult)) return errorResult;
+        if (!this.HasRole("admin") && !this.HasRole("staff"))
+            return this.ForbiddenError("Only admin or staff accounts can access this resource.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.ListAdminAuctionsAsync(
+            page, pageSize, status, sellerId, productId, hasAttentionDeposit, overdueSettlement, fromDate, toDate, ct);
         return Ok(result);
     }
 
-    /// <summary>Admin huỷ cưỡng chế một phiên chưa kết thúc (kể cả phiên đang chạy đã có người đặt giá). Bắt buộc ghi lý do.</summary>
+    /// <summary>Admin or Staff lists auctions that require attention (stuck deposits or overdue settlements).</summary>
+    [HttpGet("~/api/v1/admin/auctions/attention-required")]
+    [ProducesResponseType(typeof(PagedData<AdminAuctionSummaryDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListAttentionRequired(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken ct = default)
+    {
+        if (!this.TryGetUserId(out _, out var errorResult)) return errorResult;
+        if (!this.HasRole("admin") && !this.HasRole("staff"))
+            return this.ForbiddenError("Only admin or staff accounts can access this resource.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.ListAttentionRequiredAuctionsAsync(page, pageSize, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Admin or Staff manually retries background Catalog/Commerce/User sync for a stuck auction.</summary>
+    [HttpPost("~/api/v1/admin/auctions/{id:guid}/sync/retry")]
+    [ProducesResponseType(typeof(AdminSyncRetryResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> RetrySync([FromRoute] Guid id, CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("admin") && !this.HasRole("staff"))
+            return this.ForbiddenError("Only admin or staff accounts can access this resource.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.RetrySyncAsync(CreateActor(userId), id, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Admin or Staff invalidates a fraudulent bid in a running auction and recalculates the leading price.</summary>
+    [HttpPost("~/api/v1/admin/auctions/{auctionId:guid}/bids/{bidId:guid}/invalidate")]
+    [ProducesResponseType(typeof(InvalidateBidResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> InvalidateBid(
+        [FromRoute] Guid auctionId,
+        [FromRoute] Guid bidId,
+        [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] InvalidateBidRequest? request,
+        CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("admin") && !this.HasRole("staff"))
+            return this.ForbiddenError("Only admin or staff accounts can access this resource.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.InvalidateBidAsync(CreateActor(userId), auctionId, bidId, request, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Admin or Staff force-cancels an auction that has not ended. Reason is required.</summary>
     [HttpPost("~/api/v1/admin/auctions/{id:guid}/force-cancel")]
     [ProducesResponseType(typeof(AuctionCancelledResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> ForceCancel(
         [FromRoute] Guid id, [FromBody] ForceCancelAuctionRequest request, CancellationToken ct)
     {
         if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
-        if (!this.EnsureAdmin(out var adminError)) return adminError;
+        if (!this.HasRole("admin") && !this.HasRole("staff"))
+            return this.ForbiddenError("Only admin or staff accounts can access this resource.", "ROLE_NOT_ALLOWED");
 
         var result = await _auctionService.ForceCancelAsync(CreateActor(userId), id, request, ct);
         return Ok(result);
     }
 
-    /// <summary>Admin xem tiến trình hậu đấu giá (saga) của một phiên: các bước, bước hiện tại, hạn đang chờ và cờ quá hạn.</summary>
+    /// <summary>Admin or Staff views the post-auction settlement saga of an auction.</summary>
     [HttpGet("~/api/v1/admin/auctions/{id:guid}/saga")]
     [ProducesResponseType(typeof(AuctionSagaDto), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetSaga([FromRoute] Guid id, CancellationToken ct)
     {
         if (!this.TryGetUserId(out _, out var errorResult)) return errorResult;
-        if (!this.EnsureAdmin(out var adminError)) return adminError;
+        if (!this.HasRole("admin") && !this.HasRole("staff"))
+            return this.ForbiddenError("Only admin or staff accounts can access this resource.", "ROLE_NOT_ALLOWED");
 
         var result = await _auctionService.GetSagaAsync(id, ct);
-        return Ok(result);
-    }
-
-    /// <summary>Tiếp nhận kết quả thanh toán và quyết định của Seller từ Commerce cho một phiên đấu giá (Paid, SellerAccepted, SellerRejected, SellerExpired, PaymentTimedOut...).</summary>
-    [HttpPost("{id:guid}/settlement/payment-status")]
-    [RequireInternalServiceKey]
-    [ProducesResponseType(typeof(SettlementPaymentStatusResponse), StatusCodes.Status200OK)]
-    public async Task<ActionResult<SettlementPaymentStatusResponse>> HandlePaymentStatus(
-        [FromRoute] Guid id, [FromBody] SettlementPaymentStatusRequest request, CancellationToken ct)
-    {
-        var result = await _auctionService.HandlePaymentStatusAsync(id, request, ct);
         return Ok(result);
     }
 

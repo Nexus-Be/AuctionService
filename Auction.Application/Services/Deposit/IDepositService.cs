@@ -35,9 +35,17 @@ public interface IDepositService
     Task<MyDepositResponse> GetMyDepositAsync(
         ActorContext actor, Guid auctionId, CancellationToken cancellationToken = default);
 
+    /// <summary>Buyer xem danh sách & lịch sử các khoản cọc của chính mình trên toàn sàn (có phân trang, lọc theo trạng thái).</summary>
+    Task<PagedData<MyDepositListItemDto>> ListMyDepositsAsync(
+        ActorContext actor, int page = 1, int pageSize = 20, string? status = null, CancellationToken cancellationToken = default);
+
     /// <summary>Giải phóng các cọc đã đánh dấu ReleasePending của một phiên đấu giá (chạy sau khi commit huỷ phiên hoặc kết thúc phiên).</summary>
     Task ReleasePendingDepositsForAuctionAsync(Guid auctionId, CancellationToken cancellationToken = default);
 
     /// <summary>Quét và thực hiện lại các thao tác cọc đang chờ ở nền (Release, Capture, Refund hoặc đồng bộ cọc Pending bị timeout).</summary>
     Task ProcessDueDepositRetriesAsync(int limit, CancellationToken cancellationToken = default);
+
+    /// <summary>Admin/Staff kích hoạt đối soát & thử lại thủ công các khoản cọc của một phiên đấu giá.</summary>
+    Task<AdminDepositReconcileResponse> ReconcileAuctionDepositsAsync(
+        ActorContext actor, Guid auctionId, CancellationToken cancellationToken = default);
 }

@@ -7,11 +7,21 @@ using global::Auction.Application.Common.Models;
 
 public interface IAuctionService
 {
-    /// <summary>Lấy danh sách phiên đấu giá có phân trang, lọc theo trạng thái (tuỳ chọn).</summary>
-    Task<PagedData<AuctionSummaryDto>> ListActiveAuctionsAsync(int page = 1, int pageSize = 20, string? status = null, CancellationToken cancellationToken = default);
+    /// <summary>Lấy danh sách phiên đấu giá có phân trang, tìm kiếm, lọc và sắp xếp.</summary>
+    Task<PagedData<AuctionSummaryDto>> ListActiveAuctionsAsync(int page = 1, int pageSize = 20, AuctionListFilter? filter = null, CancellationToken cancellationToken = default);
 
     /// <summary>Lấy danh sách phiên của riêng một seller, có phân trang và lọc theo trạng thái.</summary>
     Task<PagedData<AuctionSummaryDto>> ListSellerAuctionsAsync(Guid sellerId, int page = 1, int pageSize = 20, string? status = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Lấy danh sách phiên đấu giá mà caller đã tham gia (gom theo từng phiên).</summary>
+    Task<PagedData<MyParticipatedAuctionDto>> ListMyAuctionsAsync(
+        Guid userId, int page = 1, int pageSize = 20, string? participationState = null, string? status = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Admin/Staff xem danh sách phiên đấu giá toàn sàn với bộ lọc vận hành.</summary>
+    Task<PagedData<AdminAuctionSummaryDto>> ListAdminAuctionsAsync(
+        int page = 1, int pageSize = 20, string? status = null, Guid? sellerId = null, Guid? productId = null,
+        bool? hasAttentionDeposit = null, bool? overdueSettlement = null, DateTimeOffset? fromDate = null, DateTimeOffset? toDate = null,
+        CancellationToken cancellationToken = default);
 
     /// <summary>Lấy số liệu thống kê các phiên thành công và thất bại của seller.</summary>
     Task<SellerAuctionStatisticsDto> GetSellerAuctionStatisticsAsync(Guid sellerId, CancellationToken cancellationToken = default);
@@ -77,4 +87,14 @@ public interface IAuctionService
 
     /// <summary>Seller tạo lại phiên mới từ một phiên Failed của mình.</summary>
     Task<AuctionRecreatedResponse> RecreateAsync(ActorContext actor, Guid auctionId, RecreateAuctionRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>Admin/Staff xem danh sách các phiên đang bị kẹt lỗi cọc, đồng bộ hoặc quá hạn settlement cần xử lý.</summary>
+    Task<PagedData<AdminAuctionSummaryDto>> ListAttentionRequiredAuctionsAsync(int page = 1, int pageSize = 20, CancellationToken cancellationToken = default);
+
+    /// <summary>Admin/Staff kích hoạt chạy lại đồng bộ Catalog / Commerce / User cho một phiên bị kẹt.</summary>
+    Task<AdminSyncRetryResponse> RetrySyncAsync(ActorContext actor, Guid auctionId, CancellationToken cancellationToken = default);
+
+    /// <summary>Admin/Staff vô hiệu hoá một lượt bid gian lận khi phiên đang chạy và tính lại giá dẫn đầu.</summary>
+    Task<InvalidateBidResponse> InvalidateBidAsync(
+        ActorContext actor, Guid auctionId, Guid bidId, InvalidateBidRequest? request, CancellationToken cancellationToken = default);
 }

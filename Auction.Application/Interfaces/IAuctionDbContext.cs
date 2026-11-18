@@ -23,6 +23,7 @@ public interface IAuctionDbContext
     DbSet<AuctionDeposit> AuctionDeposits { get; }
     DbSet<DepositCallbackEvent> DepositCallbackEvents { get; }
     DbSet<AuditLog> AuditLogs { get; }
+    DbSet<NotificationOutboxItem> NotificationOutbox { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }

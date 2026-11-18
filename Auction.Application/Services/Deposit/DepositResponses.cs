@@ -88,3 +88,24 @@ public sealed record MyDepositResponse(
     bool CanBid,
     string? BlockReason);
 
+public sealed record MyDepositListItemDto(
+    Guid DepositId,
+    Guid AuctionId,
+    string AuctionTitle,
+    AuctionStatus? AuctionStatus,
+    decimal Amount,
+    decimal RatePercent,
+    DepositStatus Status,
+    string? CapturePurpose,
+    int PolicyVersion,
+    DateTimeOffset? AuthorizedAt,
+    DateTimeOffset? ReleasedAt,
+    DateTimeOffset? CapturedAt,
+    DateTimeOffset CreatedAt);
+
+public sealed record AdminDepositReconcileResponse(
+    Guid AuctionId,
+    int QueuedDeposits,
+    int RemainingPendingDeposits,
+    DateTimeOffset ReconciledAt);
+

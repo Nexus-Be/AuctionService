@@ -81,3 +81,19 @@ public sealed record SecondChanceDeclineResponse(
     Guid OfferId,
     string Status,
     string AuctionStatus);
+
+public sealed record AdminSyncRetryResponse(
+    Guid AuctionId,
+    bool PushedCommerceSettlement,
+    bool PushedCatalogUnlock,
+    int ResetPendingFlags,
+    DateTimeOffset RetriedAt);
+
+public sealed record InvalidateBidResponse(
+    Guid AuctionId,
+    Guid BidId,
+    BidInvalidationReason Reason,
+    decimal? NewCurrentPriceAmount,
+    Guid? NewCurrentWinnerId,
+    int NewBidCount,
+    DateTimeOffset InvalidatedAt);

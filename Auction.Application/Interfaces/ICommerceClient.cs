@@ -27,4 +27,15 @@ public interface ICommerceClient
     /// của người thắng khác). Ném 503 khi Commerce lỗi tạm thời (đáng thử lại) và 502 khi Commerce từ chối (thử lại cũng không đổi).
     /// </summary>
     Task<Guid?> SendSettlementAsync(CommerceSettlementPayload payload, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// What the "order paid" notification needs from a paid auction order (order number, total including shipping, seller deadline).
+    /// Null when Commerce does not know the order; throws a 503 DomainException when Commerce is temporarily unavailable.
+    /// </summary>
+    Task<AuctionOrderNotificationSnapshot?> GetOrderNotificationSnapshotAsync(Guid orderId, CancellationToken cancellationToken = default);
 }
+
+/// <summary>Order data Commerce keeps and the notification of a paid auction order needs.</summary>
+public sealed record AuctionOrderNotificationSnapshot(
+    Guid OrderId, string OrderNo, decimal TotalAmount, DateTimeOffset PaidAt, DateTimeOffset SellerRespondDeadlineAt,
+    Guid BuyerId, Guid SellerId, string Status);
