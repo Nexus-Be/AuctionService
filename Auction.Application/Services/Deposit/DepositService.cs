@@ -28,17 +28,19 @@ public sealed class DepositService : IDepositService
     private readonly IAuctionDbContext _dbContext;
     private readonly IUserClient _users;
     private readonly IWalletClient _wallet;
+    private readonly INotificationClient _notifications;
     private readonly DepositOptions _options;
     private readonly TimeProvider _clock;
     private readonly ILogger<DepositService> _logger;
 
     public DepositService(
-        IAuctionDbContext dbContext, IUserClient users, IWalletClient wallet, DepositOptions options,
-        TimeProvider clock, ILogger<DepositService> logger)
+        IAuctionDbContext dbContext, IUserClient users, IWalletClient wallet, INotificationClient notifications,
+        DepositOptions options, TimeProvider clock, ILogger<DepositService> logger)
     {
         _dbContext = dbContext;
         _users = users;
         _wallet = wallet;
+        _notifications = notifications;
         _options = options;
         _clock = clock;
         _logger = logger;
@@ -324,6 +326,9 @@ public sealed class DepositService : IDepositService
             },
             userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
 
+        await QueueDepositNotificationAsync(
+            deposit, "Authorized", "DEPOSIT_HELD", deposit.AuthorizedAt ?? now, actor.TraceId, cancellationToken);
+
         var response = ToCreateResponse(deposit);
         _dbContext.IdempotencyKeys.Add(new IdempotencyKey
         {
@@ -503,7 +508,7 @@ public sealed class DepositService : IDepositService
     /// Pending plus Authorized with a different amount becomes Failed, and one that arrives after the auction closed becomes Released;
     /// both set ReleasePending so the hold is given back. Anything else leaves the deposit unchanged and returns false.
     /// </summary>
-    private static bool ApplyHoldState(
+    private bool ApplyHoldState(
         AuctionDeposit deposit, DepositHoldSnapshot snapshot, bool auctionOpen, DateTimeOffset now, out AuditAction action)
     {
         action = default;
@@ -539,6 +544,9 @@ public sealed class DepositService : IDepositService
                 deposit.Status = DepositStatus.Authorized;
                 deposit.FailureCode = null;
                 action = AuditAction.DepositAuthorize;
+                _notifications.NotifyAuctionDeposit(new AuctionDepositNotification(
+                    deposit.AuctionId, deposit.Auction?.SnapshotProductTitle, deposit.Id, deposit.BidderId,
+                    deposit.Amount, "Authorized", "DEPOSIT_HELD", deposit.AuthorizedAt ?? now));
                 return true;
 
             case (DepositStatus.Pending, DepositHoldState.Failed):
@@ -591,7 +599,12 @@ public sealed class DepositService : IDepositService
                     deposit.GatewayReference, deposit.Id);
             }
             else
-                deposit.ReleasedAt = _clock.GetUtcNow();
+            {
+                var releasedAt = _clock.GetUtcNow();
+                deposit.ReleasedAt = releasedAt;
+                await QueueDepositNotificationAsync(
+                    deposit, "Released", deposit.ReleaseReason ?? "DEPOSIT_RELEASED", releasedAt, null, cancellationToken);
+            }
 
             deposit.ReleasePending = false;
             deposit.PendingAction = DepositPendingAction.None;
@@ -1177,6 +1190,8 @@ public sealed class DepositService : IDepositService
                 deposit.ReleasedAt = now;
                 deposit.UpdatedAt = now;
                 deposit.RowVersion += 1;
+                await QueueDepositNotificationAsync(
+                    deposit, "Released", deposit.ReleaseReason ?? "DEPOSIT_RELEASED", now, null, cancellationToken);
                 await _dbContext.SaveChangesAsync(cancellationToken);
                 return;
             }
@@ -1208,7 +1223,7 @@ public sealed class DepositService : IDepositService
             var auction = await _dbContext.Auctions
                 .AsNoTracking()
                 .Where(a => a.Id == deposit.AuctionId)
-                .Select(a => new { a.SellerId })
+                .Select(a => new { a.SellerId, a.SnapshotProductTitle })
                 .FirstOrDefaultAsync(cancellationToken);
 
             decimal sellerPercent = 70m;
@@ -1244,6 +1259,9 @@ public sealed class DepositService : IDepositService
             deposit.NeedsAttention = false;
             deposit.UpdatedAt = now;
             deposit.RowVersion += 1;
+            _notifications.NotifyAuctionDeposit(new AuctionDepositNotification(
+                deposit.AuctionId, auction?.SnapshotProductTitle, deposit.Id, deposit.BidderId,
+                deposit.Amount, "Captured", purpose, now));
             await _dbContext.SaveChangesAsync(cancellationToken);
         }
         catch (DomainException ex)
@@ -1302,6 +1320,8 @@ public sealed class DepositService : IDepositService
             deposit.NeedsAttention = false;
             deposit.UpdatedAt = now;
             deposit.RowVersion += 1;
+            await QueueDepositNotificationAsync(
+                deposit, "Refunded", deposit.ReleaseReason ?? "SELLER_REJECTED", now, null, cancellationToken);
             await _dbContext.SaveChangesAsync(cancellationToken);
         }
         catch (DomainException ex)
@@ -1367,6 +1387,8 @@ public sealed class DepositService : IDepositService
             deposit.Status = DepositStatus.Authorized;
             deposit.UpdatedAt = now;
             deposit.RowVersion += 1;
+            await QueueDepositNotificationAsync(
+                deposit, "Authorized", "DEPOSIT_HELD", deposit.AuthorizedAt ?? now, null, cancellationToken);
             await _dbContext.SaveChangesAsync(cancellationToken);
             return;
         }
@@ -1379,6 +1401,25 @@ public sealed class DepositService : IDepositService
             deposit.RowVersion += 1;
             await _dbContext.SaveChangesAsync(cancellationToken);
         }
+    }
+
+    private async Task QueueDepositNotificationAsync(
+        AuctionDeposit deposit, string depositStatus, string? reason, DateTimeOffset occurredAt, string? traceId,
+        CancellationToken cancellationToken)
+    {
+        var title = deposit.Auction?.SnapshotProductTitle;
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            title = await _dbContext.Auctions
+                .AsNoTracking()
+                .Where(a => a.Id == deposit.AuctionId)
+                .Select(a => a.SnapshotProductTitle)
+                .FirstOrDefaultAsync(cancellationToken);
+        }
+
+        _notifications.NotifyAuctionDeposit(new AuctionDepositNotification(
+            deposit.AuctionId, title, deposit.Id, deposit.BidderId,
+            deposit.Amount, depositStatus, reason, occurredAt, traceId));
     }
 
     private static IReadOnlyList<HoldTransferInstruction> BuildCaptureTransfers(

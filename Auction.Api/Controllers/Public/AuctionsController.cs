@@ -370,5 +370,116 @@ public class AuctionsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Buyer adds an auction to watchlist or toggles new-bid notifications.</summary>
+    [HttpPost("{id:guid}/watch")]
+    [ProducesResponseType(typeof(WatchAuctionResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> Watch(
+        [FromRoute] Guid id,
+        [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] WatchAuctionRequest? request,
+        CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("buyer") && !this.HasRole("seller"))
+            return this.ForbiddenError("Only buyer or seller accounts can watch auctions.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.WatchAuctionAsync(CreateActor(userId), id, request, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Buyer removes an auction from watchlist.</summary>
+    [HttpDelete("{id:guid}/watch")]
+    [ProducesResponseType(typeof(WatchAuctionResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> Unwatch([FromRoute] Guid id, CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("buyer") && !this.HasRole("seller"))
+            return this.ForbiddenError("Only buyer or seller accounts can watch auctions.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.UnwatchAuctionAsync(CreateActor(userId), id, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Buyer lists their watched auctions.</summary>
+    [HttpGet("~/api/v1/me/watchlist")]
+    [ProducesResponseType(typeof(PagedData<MyWatchlistItemDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListMyWatchlist(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken ct = default)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("buyer") && !this.HasRole("seller"))
+            return this.ForbiddenError("Only buyer or seller accounts can view watchlist.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.ListMyWatchlistAsync(userId, page, pageSize, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Buyer reports a suspicious scheduled or running auction to admin/staff.</summary>
+    [HttpPost("{id:guid}/reports")]
+    [ProducesResponseType(typeof(CreateAuctionReportResponse), StatusCodes.Status201Created)]
+    public async Task<IActionResult> CreateReport(
+        [FromRoute] Guid id,
+        [FromBody] CreateAuctionReportRequest request,
+        CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("buyer") && !this.HasRole("seller"))
+            return this.ForbiddenError("Only buyer or seller accounts can report auctions.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.CreateReportAsync(CreateActor(userId), id, request, ct);
+        return StatusCode(StatusCodes.Status201Created, result);
+    }
+
+    /// <summary>Buyer views reports they submitted and admin responses.</summary>
+    [HttpGet("~/api/v1/me/reports")]
+    [ProducesResponseType(typeof(PagedData<MyAuctionReportDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListMyReports(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken ct = default)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("buyer") && !this.HasRole("seller"))
+            return this.ForbiddenError("Only buyer or seller accounts can view reports.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.ListMyReportsAsync(userId, page, pageSize, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Admin or Staff lists auction reports across the platform.</summary>
+    [HttpGet("~/api/v1/admin/auction-reports")]
+    [ProducesResponseType(typeof(PagedData<AdminAuctionReportDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListAdminReports(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        [FromQuery] string? status = null,
+        [FromQuery] Guid? auctionId = null,
+        CancellationToken ct = default)
+    {
+        if (!this.TryGetUserId(out _, out var errorResult)) return errorResult;
+        if (!this.HasRole("admin") && !this.HasRole("staff"))
+            return this.ForbiddenError("Only admin or staff accounts can access this resource.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.ListAdminReportsAsync(page, pageSize, status, auctionId, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Admin or Staff dismisses pending reports on an auction when no violation is found and notifies reporters.</summary>
+    [HttpPost("~/api/v1/admin/auctions/{id:guid}/reports/dismiss")]
+    [ProducesResponseType(typeof(DismissAuctionReportsResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> DismissReports(
+        [FromRoute] Guid id,
+        [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] DismissAuctionReportsRequest? request,
+        CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("admin") && !this.HasRole("staff"))
+            return this.ForbiddenError("Only admin or staff accounts can access this resource.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.DismissReportsAsync(CreateActor(userId), id, request, ct);
+        return Ok(result);
+    }
+
     private ActorContext CreateActor(Guid userId) => new(userId, this.GetTraceId(), this.GetClientIp());
 }

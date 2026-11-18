@@ -20,6 +20,9 @@ public static class NotificationPayloads
     public const string Cancelled = "auction-cancelled";
     public const string WinnerOffer = "auction-winner-offers";
     public const string OrderPaid = "auction-order-payments";
+    public const string WatchlistNewBid = "auction-watchlist-bids";
+    public const string ReportResolved = "auction-report-resolved";
+    public const string Deposit = "auction-deposits";
 
     /// <summary>One serializer for queueing and for sending, so the stored payload and the sent body are the same text.</summary>
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
@@ -39,6 +42,9 @@ public static class NotificationPayloads
     public static Guid CancelledId(AuctionCancelledNotification n) => DeterministicGuid($"auction-cancelled:{n.AuctionId:N}:{n.CancelledAt:O}");
     public static Guid OfferId(ReplacementWinnerOfferNotification n) => DeterministicGuid($"auction-winner-offer:{n.OfferId:N}");
     public static Guid OrderPaidId(AuctionOrderPaidNotification n) => DeterministicGuid($"auction-order-paid:{n.ResultId:N}:{n.OrderId:N}");
+    public static Guid WatchlistNewBidId(WatchlistNewBidNotification n) => DeterministicGuid($"auction-watchlist-bid:{n.TriggerBidId:N}");
+    public static Guid ReportResolvedId(AuctionReportResolvedNotification n) => DeterministicGuid($"auction-report-resolved:{n.AuctionId:N}:{n.Outcome}:{n.ResolvedAt:O}");
+    public static Guid DepositId(AuctionDepositNotification n) => DeterministicGuid($"auction-deposit:{n.DepositId:N}:{n.DepositStatus}");
 
     // ------------------------------------------------------------------ bodies
 
@@ -137,6 +143,48 @@ public static class NotificationPayloads
         sellerAcceptStartedAt = n.PaidAt,
         paidAt = n.PaidAt,
         sellerAcceptDeadline,
+        traceId = Clip(n.TraceId, 100)
+    };
+
+    public static object BuildWatchlistNewBid(WatchlistNewBidNotification n) => new
+    {
+        sourceEventId = WatchlistNewBidId(n),
+        auctionId = n.AuctionId,
+        triggerBidId = n.TriggerBidId,
+        auctionTitle = CleanTitle(n.AuctionTitle),
+        newAmount = n.NewAmount,
+        currency = "VND",
+        watcherUserIds = n.WatcherUserIds,
+        occurredAt = n.OccurredAt,
+        auctionEndsAt = n.AuctionEndsAt,
+        traceId = Clip(n.TraceId, 100)
+    };
+
+    public static object BuildReportResolved(AuctionReportResolvedNotification n) => new
+    {
+        sourceEventId = ReportResolvedId(n),
+        auctionId = n.AuctionId,
+        auctionTitle = CleanTitle(n.AuctionTitle),
+        outcome = n.Outcome,
+        message = Clip(n.Message, 1000) ?? "Your auction report has been reviewed.",
+        adminReason = Clip(n.AdminReason, 1000),
+        reporterUserIds = n.ReporterUserIds,
+        resolvedAt = n.ResolvedAt,
+        traceId = Clip(n.TraceId, 100)
+    };
+
+    public static object BuildDeposit(AuctionDepositNotification n) => new
+    {
+        sourceEventId = DepositId(n),
+        auctionId = n.AuctionId,
+        depositId = n.DepositId,
+        bidderUserId = n.BidderUserId,
+        auctionTitle = CleanTitle(n.AuctionTitle),
+        amount = n.Amount,
+        currency = "VND",
+        depositStatus = n.DepositStatus,
+        reason = Clip(n.Reason, 200),
+        occurredAt = n.OccurredAt,
         traceId = Clip(n.TraceId, 100)
     };
 

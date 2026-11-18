@@ -98,6 +98,28 @@ public sealed class NotificationClient : INotificationClient
         Add(NotificationPayloads.OrderPaid, notification.AuctionId, NotificationPayloads.OrderPaidId(notification),
             payload: null, context: notification);
 
+    public void NotifyWatchlistNewBid(WatchlistNewBidNotification notification)
+    {
+        if (notification.WatcherUserIds.Count == 0)
+            return;
+
+        Add(NotificationPayloads.WatchlistNewBid, notification.AuctionId, NotificationPayloads.WatchlistNewBidId(notification),
+            NotificationPayloads.BuildWatchlistNewBid(notification), context: null);
+    }
+
+    public void NotifyAuctionReportResolved(AuctionReportResolvedNotification notification)
+    {
+        if (notification.ReporterUserIds.Count == 0)
+            return;
+
+        Add(NotificationPayloads.ReportResolved, notification.AuctionId, NotificationPayloads.ReportResolvedId(notification),
+            NotificationPayloads.BuildReportResolved(notification), context: null);
+    }
+
+    public void NotifyAuctionDeposit(AuctionDepositNotification notification) =>
+        Add(NotificationPayloads.Deposit, notification.AuctionId, NotificationPayloads.DepositId(notification),
+            NotificationPayloads.BuildDeposit(notification), context: null);
+
     private void Add(string kind, Guid auctionId, Guid eventId, object? payload, object? context)
     {
         if (!_options.Enabled)

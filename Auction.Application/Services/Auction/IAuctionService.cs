@@ -97,4 +97,32 @@ public interface IAuctionService
     /// <summary>Admin/Staff vô hiệu hoá một lượt bid gian lận khi phiên đang chạy và tính lại giá dẫn đầu.</summary>
     Task<InvalidateBidResponse> InvalidateBidAsync(
         ActorContext actor, Guid auctionId, Guid bidId, InvalidateBidRequest? request, CancellationToken cancellationToken = default);
+
+    /// <summary>Buyer yêu thích / theo dõi phiên đấu giá (và bật/tắt thông báo khi có bid mới).</summary>
+    Task<WatchAuctionResponse> WatchAuctionAsync(
+        ActorContext actor, Guid auctionId, WatchAuctionRequest? request, CancellationToken cancellationToken = default);
+
+    /// <summary>Buyer bỏ yêu thích / ngừng theo dõi phiên đấu giá.</summary>
+    Task<WatchAuctionResponse> UnwatchAuctionAsync(
+        ActorContext actor, Guid auctionId, CancellationToken cancellationToken = default);
+
+    /// <summary>Buyer xem danh sách các phiên đấu giá mình đã yêu thích / theo dõi.</summary>
+    Task<PagedData<MyWatchlistItemDto>> ListMyWatchlistAsync(
+        Guid userId, int page = 1, int pageSize = 20, CancellationToken cancellationToken = default);
+
+    /// <summary>Buyer gửi báo cáo vi phạm cho một phiên đấu giá đang mở.</summary>
+    Task<CreateAuctionReportResponse> CreateReportAsync(
+        ActorContext actor, Guid auctionId, CreateAuctionReportRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>Buyer xem lịch sử các báo cáo mình đã gửi và phản hồi từ Admin.</summary>
+    Task<PagedData<MyAuctionReportDto>> ListMyReportsAsync(
+        Guid userId, int page = 1, int pageSize = 20, CancellationToken cancellationToken = default);
+
+    /// <summary>Admin/Staff xem danh sách báo cáo phiên đấu giá trên toàn sàn.</summary>
+    Task<PagedData<AdminAuctionReportDto>> ListAdminReportsAsync(
+        int page = 1, int pageSize = 20, string? status = null, Guid? auctionId = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Admin/Staff đánh dấu các báo cáo của phiên là không có sai phạm và gửi phản hồi cho người tố cáo.</summary>
+    Task<DismissAuctionReportsResponse> DismissReportsAsync(
+        ActorContext actor, Guid auctionId, DismissAuctionReportsRequest? request, CancellationToken cancellationToken = default);
 }

@@ -97,3 +97,22 @@ public sealed record InvalidateBidResponse(
     Guid? NewCurrentWinnerId,
     int NewBidCount,
     DateTimeOffset InvalidatedAt);
+
+public sealed record WatchAuctionResponse(
+    Guid AuctionId,
+    bool IsWatching,
+    bool NotifyOnNewBid,
+    DateTimeOffset UpdatedAt);
+
+public sealed record CreateAuctionReportResponse(
+    Guid ReportId,
+    Guid AuctionId,
+    AuctionReportReason Reason,
+    AuctionReportStatus Status,
+    DateTimeOffset CreatedAt);
+
+public sealed record DismissAuctionReportsResponse(
+    Guid AuctionId,
+    int DismissedCount,
+    string Note,
+    DateTimeOffset ReviewedAt);
