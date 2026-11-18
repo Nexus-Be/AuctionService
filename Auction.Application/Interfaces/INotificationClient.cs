@@ -1,6 +1,7 @@
 namespace Auction.Application.Interfaces;
 
 using System;
+using System.Collections.Generic;
 
 /// <summary>
 /// Queues a notification for the Notification service. The methods only <b>add a row to the notification outbox of the current unit of work</b>
@@ -30,7 +31,47 @@ public interface INotificationClient
     /// Fields Commerce did not send (OrderNo, TotalAmount, SellerAcceptDeadline) are fetched by the worker before anything is sent.
     /// </summary>
     void NotifyAuctionOrderPaid(AuctionOrderPaidNotification notification);
+
+    /// <summary>Notifies watchers (who opted in for bid alerts) that a new bid was placed on a watched auction.</summary>
+    void NotifyWatchlistNewBid(WatchlistNewBidNotification notification);
+
+    /// <summary>Notifies reporters of the admin's decision (thank-you after manual force-cancel, or dismissed with no violation found).</summary>
+    void NotifyAuctionReportResolved(AuctionReportResolvedNotification notification);
+
+    /// <summary>Notifies a bidder when their deposit is held, released, captured, or refunded.</summary>
+    void NotifyAuctionDeposit(AuctionDepositNotification notification);
 }
+
+public sealed record AuctionDepositNotification(
+    Guid AuctionId,
+    string? AuctionTitle,
+    Guid DepositId,
+    Guid BidderUserId,
+    decimal Amount,
+    string DepositStatus,
+    string? Reason,
+    DateTimeOffset OccurredAt,
+    string? TraceId = null);
+
+public sealed record WatchlistNewBidNotification(
+    Guid AuctionId,
+    string? AuctionTitle,
+    Guid TriggerBidId,
+    decimal NewAmount,
+    IReadOnlyList<Guid> WatcherUserIds,
+    DateTimeOffset OccurredAt,
+    DateTimeOffset AuctionEndsAt,
+    string? TraceId);
+
+public sealed record AuctionReportResolvedNotification(
+    Guid AuctionId,
+    string? AuctionTitle,
+    string Outcome,
+    string Message,
+    string? AdminReason,
+    IReadOnlyList<Guid> ReporterUserIds,
+    DateTimeOffset ResolvedAt,
+    string? TraceId);
 
 /// <summary>An auction order that was just paid. The auction itself is still Ended (it becomes Settled only after the seller accepts).</summary>
 public sealed record AuctionOrderPaidNotification(

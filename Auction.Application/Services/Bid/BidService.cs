@@ -335,6 +335,26 @@ public sealed class BidService : IBidService
                 actor.UserId, auction.SellerId, outbidBid.Amount, amount, now, state.ScheduledEndAt, actor.TraceId));
         }
 
+        // Notify watchers who opted in for new-bid alerts, excluding the bidder, outbid user, and seller to avoid duplicate alerts.
+        var excludedOutbidUserId = outbidBid?.BidderId;
+        var watcherUserIds = await _dbContext.AuctionWatches
+            .AsNoTracking()
+            .Where(w => w.AuctionId == auctionId
+                        && !w.IsDeleted
+                        && w.NotifyOnNewBid
+                        && w.UserId != actor.UserId
+                        && w.UserId != auction.SellerId
+                        && (excludedOutbidUserId == null || w.UserId != excludedOutbidUserId.Value))
+            .Select(w => w.UserId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+
+        if (watcherUserIds.Count > 0)
+        {
+            _notifications.NotifyWatchlistNewBid(new WatchlistNewBidNotification(
+                auctionId, auction.SnapshotProductTitle, bid.Id, amount, watcherUserIds, now, state.ScheduledEndAt, actor.TraceId));
+        }
+
         try
         {
             await _dbContext.SaveChangesAsync(cancellationToken);

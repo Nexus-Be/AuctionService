@@ -250,3 +250,46 @@ public sealed record AdminAuctionSummaryDto(
     bool HasOverdueSettlement,
     bool NeedsAttention,
     DateTimeOffset CreatedAt);
+
+public sealed record MyWatchlistItemDto(
+    Guid AuctionId,
+    Guid ProductId,
+    Guid? SkuId,
+    Guid SellerId,
+    string? ProductName,
+    string? PrimaryImageUrl,
+    AuctionStatus Status,
+    decimal StartPriceAmount,
+    decimal? CurrentPriceAmount,
+    int BidCount,
+    bool NotifyOnNewBid,
+    DateTimeOffset ScheduledStartAt,
+    DateTimeOffset ScheduledEndAt,
+    DateTimeOffset WatchedAt);
+
+public sealed record MyAuctionReportDto(
+    Guid ReportId,
+    Guid AuctionId,
+    string? AuctionTitle,
+    AuctionStatus? AuctionStatus,
+    AuctionReportReason Reason,
+    string Description,
+    AuctionReportStatus Status,
+    string? AdminNote,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset? ReviewedAt);
+
+public sealed record AdminAuctionReportDto(
+    Guid ReportId,
+    Guid AuctionId,
+    string? AuctionTitle,
+    AuctionStatus? AuctionStatus,
+    Guid SellerId,
+    Guid ReporterId,
+    AuctionReportReason Reason,
+    string Description,
+    AuctionReportStatus Status,
+    string? AdminNote,
+    Guid? ReviewedBy,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset? ReviewedAt);

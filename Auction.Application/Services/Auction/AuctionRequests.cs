@@ -84,3 +84,9 @@ public sealed record AuctionListFilter(
     string? SortBy = null);
 
 public sealed record InvalidateBidRequest(string? Reason = null);
+
+public sealed record WatchAuctionRequest(bool NotifyOnNewBid = true);
+
+public sealed record CreateAuctionReportRequest(AuctionReportReason? Reason, string? Description);
+
+public sealed record DismissAuctionReportsRequest(string? Note = null);

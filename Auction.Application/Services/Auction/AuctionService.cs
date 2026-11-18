@@ -491,6 +491,339 @@ public sealed class AuctionService : IAuctionService
             auctionId, bidId, reason, state.CurrentPriceAmount, state.CurrentWinnerId, state.BidCount, now);
     }
 
+    // ------------------------------------------------------------------ Watchlist & Reports
+
+    /// <summary>Buyer yêu thích / theo dõi phiên đấu giá và chọn có nhận thông báo bid mới hay không.</summary>
+    public async Task<WatchAuctionResponse> WatchAuctionAsync(
+        ActorContext actor, Guid auctionId, WatchAuctionRequest? request, CancellationToken cancellationToken = default)
+    {
+        if (auctionId == Guid.Empty)
+            throw Invalid("VAL_INVALID_IDENTIFIER", "Auction ID is required.");
+
+        var auction = await _dbContext.Auctions
+            .AsNoTracking()
+            .Include(a => a.AuctionState)
+            .FirstOrDefaultAsync(a => a.Id == auctionId && !a.IsDeleted, cancellationToken);
+        if (auction?.AuctionState is null)
+            throw NotFound(auctionId);
+
+        if (auction.SellerId == actor.UserId)
+            throw new DomainException("SELLER_CANNOT_WATCH", "Sellers cannot add their own auction to watchlist.", 403);
+
+        var notify = request?.NotifyOnNewBid ?? true;
+        var now = _clock.GetUtcNow();
+
+        var existing = await _dbContext.AuctionWatches
+            .FirstOrDefaultAsync(w => w.AuctionId == auctionId && w.UserId == actor.UserId, cancellationToken);
+
+        if (existing is null)
+        {
+            _dbContext.AuctionWatches.Add(new AuctionWatch
+            {
+                Id = Guid.NewGuid(),
+                AuctionId = auctionId,
+                UserId = actor.UserId,
+                NotifyOnNewBid = notify,
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+        }
+        else
+        {
+            existing.IsDeleted = false;
+            existing.DeletedAt = null;
+            existing.NotifyOnNewBid = notify;
+            existing.UpdatedAt = now;
+        }
+
+        await SaveAsync(null, cancellationToken);
+        return new WatchAuctionResponse(auctionId, IsWatching: true, notify, now);
+    }
+
+    /// <summary>Buyer bỏ yêu thích / ngừng theo dõi phiên đấu giá.</summary>
+    public async Task<WatchAuctionResponse> UnwatchAuctionAsync(
+        ActorContext actor, Guid auctionId, CancellationToken cancellationToken = default)
+    {
+        if (auctionId == Guid.Empty)
+            throw Invalid("VAL_INVALID_IDENTIFIER", "Auction ID is required.");
+
+        var now = _clock.GetUtcNow();
+        var existing = await _dbContext.AuctionWatches
+            .FirstOrDefaultAsync(w => w.AuctionId == auctionId && w.UserId == actor.UserId && !w.IsDeleted, cancellationToken);
+
+        if (existing is not null)
+        {
+            existing.IsDeleted = true;
+            existing.DeletedAt = now;
+            existing.UpdatedAt = now;
+            await SaveAsync(null, cancellationToken);
+        }
+
+        return new WatchAuctionResponse(auctionId, IsWatching: false, NotifyOnNewBid: false, now);
+    }
+
+    /// <summary>Buyer xem danh sách các phiên đấu giá đã yêu thích / theo dõi.</summary>
+    public async Task<PagedData<MyWatchlistItemDto>> ListMyWatchlistAsync(
+        Guid userId, int page = 1, int pageSize = 20, CancellationToken cancellationToken = default)
+    {
+        var (safePage, safePageSize) = PaginationConstants.Normalize(page, pageSize);
+
+        var query = _dbContext.AuctionWatches
+            .AsNoTracking()
+            .Where(w => w.UserId == userId && !w.IsDeleted && w.Auction != null && !w.Auction.IsDeleted && w.Auction.AuctionState != null);
+
+        var totalCount = await query.CountAsync(cancellationToken);
+
+        var rows = await query
+            .OrderByDescending(w => w.UpdatedAt)
+            .ThenBy(w => w.Id)
+            .Skip((safePage - 1) * safePageSize)
+            .Take(safePageSize)
+            .Select(w => new
+            {
+                w.AuctionId,
+                w.Auction!.ProductId,
+                w.Auction.SkuId,
+                w.Auction.SellerId,
+                w.Auction.SnapshotProductTitle,
+                Status = w.Auction.AuctionState!.Status,
+                w.Auction.StartPriceAmount,
+                CurrentPriceAmount = w.Auction.AuctionState.CurrentPriceAmount,
+                BidCount = w.Auction.AuctionState.BidCount,
+                w.NotifyOnNewBid,
+                w.Auction.ScheduledStartAt,
+                ScheduledEndAt = w.Auction.AuctionState.ScheduledEndAt,
+                WatchedAt = w.UpdatedAt
+            })
+            .ToListAsync(cancellationToken);
+
+        var images = await TryGetMainImagesAsync(
+            rows.Where(r => r.SkuId.HasValue).Select(r => r.SkuId!.Value).Distinct().ToList(), cancellationToken);
+
+        var items = rows.Select(r => new MyWatchlistItemDto(
+            r.AuctionId,
+            r.ProductId,
+            r.SkuId,
+            r.SellerId,
+            r.SnapshotProductTitle,
+            r.SkuId is { } skuId && images.TryGetValue(skuId, out var imageUrl) ? imageUrl : null,
+            r.Status,
+            r.StartPriceAmount,
+            r.CurrentPriceAmount,
+            r.BidCount,
+            r.NotifyOnNewBid,
+            r.ScheduledStartAt,
+            r.ScheduledEndAt,
+            r.WatchedAt)).ToList();
+
+        return new PagedData<MyWatchlistItemDto>(items, PaginationMetadata.Create(safePage, safePageSize, totalCount));
+    }
+
+    /// <summary>Buyer gửi báo cáo vi phạm cho một phiên đấu giá đang Scheduled hoặc Running.</summary>
+    public async Task<CreateAuctionReportResponse> CreateReportAsync(
+        ActorContext actor, Guid auctionId, CreateAuctionReportRequest request, CancellationToken cancellationToken = default)
+    {
+        if (auctionId == Guid.Empty)
+            throw Invalid("VAL_INVALID_IDENTIFIER", "Auction ID is required.");
+        if (request.Reason is null || !Enum.IsDefined(request.Reason.Value))
+            throw Invalid("VAL_INVALID_REASON", "A valid report reason is required.");
+
+        var description = request.Description?.Trim();
+        if (string.IsNullOrEmpty(description) || description.Length < 10)
+            throw Invalid("VAL_INVALID_DESCRIPTION", "Report description must be at least 10 characters.");
+        if (description.Length > 1000)
+            throw Invalid("VAL_INVALID_DESCRIPTION", "Report description must be at most 1000 characters.");
+
+        var auction = await _dbContext.Auctions
+            .AsNoTracking()
+            .Include(a => a.AuctionState)
+            .FirstOrDefaultAsync(a => a.Id == auctionId && !a.IsDeleted, cancellationToken);
+        if (auction?.AuctionState is null)
+            throw NotFound(auctionId);
+
+        if (auction.SellerId == actor.UserId)
+            throw new DomainException("SELLER_CANNOT_REPORT", "Sellers cannot report their own auction.", 403);
+
+        if (auction.AuctionState.Status is not (AuctionStatus.Scheduled or AuctionStatus.Running))
+            throw new BusinessRuleValidationException(
+                "INVALID_STATE_TRANSITION", "Only scheduled or running auctions can be reported.", 422);
+
+        var alreadyReported = await _dbContext.AuctionReports
+            .AsNoTracking()
+            .AnyAsync(r => r.AuctionId == auctionId && r.ReporterId == actor.UserId && !r.IsDeleted, cancellationToken);
+        if (alreadyReported)
+            throw new DomainException("REPORT_ALREADY_EXISTS", "You have already reported this auction.", 409);
+
+        var now = _clock.GetUtcNow();
+        var report = new AuctionReport
+        {
+            Id = Guid.NewGuid(),
+            AuctionId = auctionId,
+            ReporterId = actor.UserId,
+            Reason = request.Reason.Value,
+            Description = description,
+            Status = AuctionReportStatus.Pending,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+
+        _dbContext.AuctionReports.Add(report);
+        _dbContext.AddAuditLog(
+            AuditAction.AuctionReportCreate, "AuctionReport", report.Id.ToString(),
+            oldValues: null,
+            newValues: new { auctionId, reason = report.Reason.ToString(), status = report.Status.ToString() },
+            userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+
+        await SaveAsync(null, cancellationToken);
+        return new CreateAuctionReportResponse(report.Id, auctionId, report.Reason, report.Status, now);
+    }
+
+    /// <summary>Buyer xem danh sách các báo cáo mình đã gửi và phản hồi từ Admin.</summary>
+    public async Task<PagedData<MyAuctionReportDto>> ListMyReportsAsync(
+        Guid userId, int page = 1, int pageSize = 20, CancellationToken cancellationToken = default)
+    {
+        var (safePage, safePageSize) = PaginationConstants.Normalize(page, pageSize);
+
+        var query = _dbContext.AuctionReports
+            .AsNoTracking()
+            .Where(r => r.ReporterId == userId && !r.IsDeleted);
+
+        var totalCount = await query.CountAsync(cancellationToken);
+
+        var items = await query
+            .OrderByDescending(r => r.CreatedAt)
+            .ThenBy(r => r.Id)
+            .Skip((safePage - 1) * safePageSize)
+            .Take(safePageSize)
+            .Select(r => new MyAuctionReportDto(
+                r.Id,
+                r.AuctionId,
+                r.Auction != null ? r.Auction.SnapshotProductTitle : null,
+                r.Auction != null && r.Auction.AuctionState != null ? r.Auction.AuctionState.Status : null,
+                r.Reason,
+                r.Description,
+                r.Status,
+                r.AdminNote,
+                r.CreatedAt,
+                r.ReviewedAt))
+            .ToListAsync(cancellationToken);
+
+        return new PagedData<MyAuctionReportDto>(items, PaginationMetadata.Create(safePage, safePageSize, totalCount));
+    }
+
+    /// <summary>Admin/Staff xem danh sách báo cáo phiên đấu giá trên toàn sàn.</summary>
+    public async Task<PagedData<AdminAuctionReportDto>> ListAdminReportsAsync(
+        int page = 1, int pageSize = 20, string? status = null, Guid? auctionId = null, CancellationToken cancellationToken = default)
+    {
+        var (safePage, safePageSize) = PaginationConstants.Normalize(page, pageSize);
+
+        AuctionReportStatus? statusFilter = null;
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            var trimmed = status.Trim();
+            if (int.TryParse(trimmed, out _)
+                || !Enum.TryParse<AuctionReportStatus>(trimmed, ignoreCase: true, out var parsed)
+                || !Enum.IsDefined(parsed))
+            {
+                throw Invalid("VAL_INVALID_STATUS", "Report status must be one of Pending, ActionTaken or Dismissed.");
+            }
+            statusFilter = parsed;
+        }
+
+        var query = _dbContext.AuctionReports
+            .AsNoTracking()
+            .Where(r => !r.IsDeleted);
+
+        if (statusFilter is { } filter)
+            query = query.Where(r => r.Status == filter);
+        if (auctionId is { } aId && aId != Guid.Empty)
+            query = query.Where(r => r.AuctionId == aId);
+
+        var totalCount = await query.CountAsync(cancellationToken);
+
+        var items = await query
+            .OrderBy(r => r.Status)
+            .ThenByDescending(r => r.CreatedAt)
+            .ThenBy(r => r.Id)
+            .Skip((safePage - 1) * safePageSize)
+            .Take(safePageSize)
+            .Select(r => new AdminAuctionReportDto(
+                r.Id,
+                r.AuctionId,
+                r.Auction != null ? r.Auction.SnapshotProductTitle : null,
+                r.Auction != null && r.Auction.AuctionState != null ? r.Auction.AuctionState.Status : null,
+                r.Auction != null ? r.Auction.SellerId : Guid.Empty,
+                r.ReporterId,
+                r.Reason,
+                r.Description,
+                r.Status,
+                r.AdminNote,
+                r.ReviewedBy,
+                r.CreatedAt,
+                r.ReviewedAt))
+            .ToListAsync(cancellationToken);
+
+        return new PagedData<AdminAuctionReportDto>(items, PaginationMetadata.Create(safePage, safePageSize, totalCount));
+    }
+
+    /// <summary>Admin/Staff xác nhận phiên không có sai phạm: đóng các báo cáo Pending sang Dismissed và gửi phản hồi cho người tố cáo.</summary>
+    public async Task<DismissAuctionReportsResponse> DismissReportsAsync(
+        ActorContext actor, Guid auctionId, DismissAuctionReportsRequest? request, CancellationToken cancellationToken = default)
+    {
+        if (auctionId == Guid.Empty)
+            throw Invalid("VAL_INVALID_IDENTIFIER", "Auction ID is required.");
+
+        var auction = await _dbContext.Auctions
+            .AsNoTracking()
+            .FirstOrDefaultAsync(a => a.Id == auctionId && !a.IsDeleted, cancellationToken);
+        if (auction is null)
+            throw NotFound(auctionId);
+
+        var now = _clock.GetUtcNow();
+        var note = string.IsNullOrWhiteSpace(request?.Note)
+            ? "No policy violation was found after review."
+            : request.Note.Trim();
+        if (note.Length > 1000)
+            throw Invalid("VAL_INVALID_REASON", "Note must be at most 1000 characters.");
+
+        var pendingReports = await _dbContext.AuctionReports
+            .Where(r => r.AuctionId == auctionId && !r.IsDeleted && r.Status == AuctionReportStatus.Pending)
+            .ToListAsync(cancellationToken);
+
+        if (pendingReports.Count > 0)
+        {
+            var dismissMessage = $"Your report on \"{auction.SnapshotProductTitle ?? "this auction"}\" has been reviewed. No policy violation was found at this time.";
+            foreach (var report in pendingReports)
+            {
+                report.Status = AuctionReportStatus.Dismissed;
+                report.AdminNote = note;
+                report.ReviewedBy = actor.UserId;
+                report.ReviewedAt = now;
+                report.UpdatedAt = now;
+            }
+
+            _notifications.NotifyAuctionReportResolved(new AuctionReportResolvedNotification(
+                auctionId,
+                auction.SnapshotProductTitle,
+                AuctionReportStatus.Dismissed.ToString(),
+                dismissMessage,
+                note,
+                pendingReports.Select(r => r.ReporterId).Distinct().ToList(),
+                now,
+                actor.TraceId));
+
+            _dbContext.AddAuditLog(
+                AuditAction.AuctionReportResolve, "Auction", auctionId.ToString(),
+                oldValues: null,
+                newValues: new { outcome = AuctionReportStatus.Dismissed.ToString(), dismissedCount = pendingReports.Count, note },
+                userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+
+            await SaveAsync(null, cancellationToken);
+        }
+
+        return new DismissAuctionReportsResponse(auctionId, pendingReports.Count, note, now);
+    }
+
     /// <summary>Lấy số liệu thống kê các phiên thành công và thất bại của seller.</summary>
     public async Task<SellerAuctionStatisticsDto> GetSellerAuctionStatisticsAsync(
         Guid sellerId, CancellationToken cancellationToken = default)
@@ -2047,6 +2380,33 @@ public sealed class AuctionService : IAuctionService
 
         _notifications.NotifyAuctionCancelled(new AuctionCancelledNotification(
             auction.Id, auction.SellerId, auction.SnapshotProductTitle, reason, now, true, actor.TraceId));
+
+        // When admin/staff manually force-cancels an auction, resolve any pending reports as ActionTaken and thank reporters.
+        var pendingReports = await _dbContext.AuctionReports
+            .Where(r => r.AuctionId == auction.Id && !r.IsDeleted && r.Status == AuctionReportStatus.Pending)
+            .ToListAsync(cancellationToken);
+        if (pendingReports.Count > 0)
+        {
+            var thankYouMessage = $"Thank you for reporting \"{auction.SnapshotProductTitle ?? "this auction"}\". An administrator verified the issue and cancelled the auction.";
+            foreach (var report in pendingReports)
+            {
+                report.Status = AuctionReportStatus.ActionTaken;
+                report.AdminNote = reason;
+                report.ReviewedBy = actor.UserId;
+                report.ReviewedAt = now;
+                report.UpdatedAt = now;
+            }
+
+            _notifications.NotifyAuctionReportResolved(new AuctionReportResolvedNotification(
+                auction.Id,
+                auction.SnapshotProductTitle,
+                AuctionReportStatus.ActionTaken.ToString(),
+                thankYouMessage,
+                reason,
+                pendingReports.Select(r => r.ReporterId).Distinct().ToList(),
+                now,
+                actor.TraceId));
+        }
 
         await SaveAsync(null, cancellationToken);
 
