@@ -1,4 +1,4 @@
-using Auction.Domain.Base;
+  using Auction.Domain.Base;
 using Auction.Domain.Enums;
 
 namespace Auction.Domain.Entities;
