@@ -29,6 +29,7 @@ public class AppDbContext : DbContext, IAuctionDbContext
     public DbSet<NotificationOutboxItem> NotificationOutbox => Set<NotificationOutboxItem>();
     public DbSet<AuctionWatch> AuctionWatches => Set<AuctionWatch>();
     public DbSet<AuctionReport> AuctionReports => Set<AuctionReport>();
+    public DbSet<SellerReservePenalty> SellerReservePenalties => Set<SellerReservePenalty>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

@@ -98,9 +98,10 @@ public sealed class WalletClient : IWalletClient
     public async Task<DepositReleaseOutcome> ReleaseDepositHoldAsync(
         string holdId, string reason, string idempotencyKey, CancellationToken cancellationToken = default)
     {
+        var walletReason = NormalizeReleaseReason(reason);
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{HoldsPath}/{Uri.EscapeDataString(holdId)}/release")
         {
-            Content = JsonContent.Create(new { reason }, options: JsonOptions)
+            Content = JsonContent.Create(new { reason = walletReason }, options: JsonOptions)
         };
         request.Headers.TryAddWithoutValidation("Idempotency-Key", ToIdempotencyKey(idempotencyKey));
 
@@ -352,4 +353,20 @@ public sealed class WalletClient : IWalletClient
 
     private static DomainException InvalidResponse(string detail) =>
         new("PAYMENT_RESPONSE_INVALID", $"The wallet service returned an invalid response: {detail}.", 502);
+
+    /// <summary>
+    /// Maps Auction's detailed internal release reasons to the 4 canonical reasons accepted by WalletService
+    /// (AUCTION_ENDED_NOT_WINNER, AUCTION_CANCELLED, AUCTION_FAILED, ADMIN_FORCE_CANCEL).
+    /// </summary>
+    private static string NormalizeReleaseReason(string? reason)
+    {
+        var normalized = reason?.Trim().ToUpperInvariant();
+        return normalized switch
+        {
+            "ADMIN_FORCE_CANCEL" => "ADMIN_FORCE_CANCEL",
+            "AUCTION_CANCELLED" or "ORDER_CANCELLED" => "AUCTION_CANCELLED",
+            "AUCTION_FAILED" or "RESERVE_NOT_MET" or "SECOND_CHANCE_EXPIRED" or "SECOND_CHANCE_DECLINED" => "AUCTION_FAILED",
+            _ => "AUCTION_ENDED_NOT_WINNER"
+        };
+    }
 }

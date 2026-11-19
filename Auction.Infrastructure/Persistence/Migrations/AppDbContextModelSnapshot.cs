@@ -38,6 +38,9 @@ namespace Auction.Infrastructure.Persistence.Migrations
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
 
+                    b.Property<decimal?>("BuyNowPriceAmount")
+                        .HasColumnType("numeric(18,2)");
+
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -89,6 +92,9 @@ namespace Auction.Infrastructure.Persistence.Migrations
 
                     b.Property<Guid?>("RecreatedFromAuctionId")
                         .HasColumnType("uuid");
+
+                    b.Property<decimal?>("ReservePriceAmount")
+                        .HasColumnType("numeric(18,2)");
 
                     b.Property<DateTimeOffset>("ScheduledStartAt")
                         .HasColumnType("timestamp with time zone");
@@ -532,11 +538,29 @@ namespace Auction.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("AuctionId")
                         .HasColumnType("uuid");
 
+                    b.Property<decimal?>("BuyNowGoodsAmount")
+                        .HasColumnType("numeric(18,2)");
+
+                    b.Property<Guid?>("BuyNowGoodsDepositId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("BuyNowGoodsHoldId")
+                        .HasColumnType("text");
+
+                    b.Property<int>("BuyNowGoodsPendingAction")
+                        .HasColumnType("integer");
+
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTimeOffset?>("DeletedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsBelowReserve")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsBuyNow")
+                        .HasColumnType("boolean");
 
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("boolean");
@@ -548,6 +572,9 @@ namespace Auction.Infrastructure.Persistence.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTimeOffset?>("PaymentDeadlineAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("SellerApprovalDeadlineAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("Status")
@@ -687,6 +714,41 @@ namespace Auction.Infrastructure.Persistence.Migrations
                     b.HasIndex("UserId", "CreatedAt");
 
                     b.ToTable("AuctionWatches", (string)null);
+                });
+
+            modelBuilder.Entity("Auction.Domain.Entities.SellerReservePenalty", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("ConsecutiveDeclineCount")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTimeOffset?>("ReserveRestrictedUntil")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("SellerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SellerId")
+                        .IsUnique();
+
+                    b.ToTable("SellerReservePenalties", (string)null);
                 });
 
             modelBuilder.Entity("Auction.Domain.Entities.AuctionState", b =>
@@ -1631,6 +1693,41 @@ namespace Auction.Infrastructure.Persistence.Migrations
                     b.HasIndex("UserId", "CreatedAt");
 
                     b.ToTable("AuctionWatches", (string)null);
+                });
+
+            modelBuilder.Entity("Auction.Domain.Entities.SellerReservePenalty", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("ConsecutiveDeclineCount")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTimeOffset?>("ReserveRestrictedUntil")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("SellerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SellerId")
+                        .IsUnique();
+
+                    b.ToTable("SellerReservePenalties", (string)null);
                 });
 
             modelBuilder.Entity("Auction.Domain.Entities.AuctionState", b =>
