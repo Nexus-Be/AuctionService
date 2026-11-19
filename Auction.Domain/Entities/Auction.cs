@@ -12,6 +12,8 @@ public class Auction : AuditableEntity<Guid>
     public Guid? RecreatedFromAuctionId { get; set; }
     public required decimal StartPriceAmount { get; set; }
     public required decimal BidStepAmount { get; set; }
+    public decimal? ReservePriceAmount { get; set; }
+    public decimal? BuyNowPriceAmount { get; set; }
     public required DateTimeOffset ScheduledStartAt { get; set; }
     public required DateTimeOffset OriginalEndAt { get; set; }
     public int MinReputationToBid { get; set; }

@@ -481,5 +481,65 @@ public class AuctionsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Buyer executes Buy Now to lock the full item price and win the auction immediately.</summary>
+    [HttpPost("{id:guid}/buy-now")]
+    [ProducesResponseType(typeof(BuyNowResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> BuyNow([FromRoute] Guid id, CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("buyer") && !this.HasRole("seller"))
+            return this.ForbiddenError("Only buyer or seller accounts can use Buy Now.", "ROLE_NOT_ALLOWED");
+
+        long? expectedRowVersion = null;
+        if (Request.Headers.TryGetValue("If-Match", out var ifMatchRaw))
+        {
+            var cleaned = ifMatchRaw.ToString().Trim().Trim('"');
+            if (!string.IsNullOrEmpty(cleaned) && long.TryParse(cleaned, out var parsedVersion))
+                expectedRowVersion = parsedVersion;
+        }
+
+        var result = await _auctionService.BuyNowAsync(CreateActor(userId), id, this.GetIdempotencyKey(), expectedRowVersion, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Seller approves selling below reserve price within 12 hours after auction end.</summary>
+    [HttpPost("{id:guid}/reserve-approval/accept")]
+    [ProducesResponseType(typeof(ReserveApprovalResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ApproveBelowReserve([FromRoute] Guid id, CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.EnsureRole("seller", out var roleError)) return roleError;
+
+        var result = await _auctionService.ApproveBelowReserveAsync(CreateActor(userId), id, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Seller declines selling below reserve price within 12 hours (3 consecutive declines restrict ReservePrice for 14 days).</summary>
+    [HttpPost("{id:guid}/reserve-approval/decline")]
+    [ProducesResponseType(typeof(ReserveApprovalResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> RejectBelowReserve(
+        [FromRoute] Guid id,
+        [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] RejectBelowReserveRequest? request,
+        CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.EnsureRole("seller", out var roleError)) return roleError;
+
+        var result = await _auctionService.RejectBelowReserveAsync(CreateActor(userId), id, request, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Seller checks their below-reserve decline streak and whether ReservePrice is temporarily restricted.</summary>
+    [HttpGet("~/api/v1/seller/reserve-status")]
+    [ProducesResponseType(typeof(SellerReserveStatusResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetSellerReserveStatus(CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.EnsureRole("seller", out var roleError)) return roleError;
+
+        var result = await _auctionService.GetSellerReserveStatusAsync(userId, ct);
+        return Ok(result);
+    }
+
     private ActorContext CreateActor(Guid userId) => new(userId, this.GetTraceId(), this.GetClientIp());
 }

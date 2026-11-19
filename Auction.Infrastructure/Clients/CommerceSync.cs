@@ -217,7 +217,9 @@ public sealed class CommerceSyncWorker : BackgroundService
                 var isSecondChance = await db.AuctionWinnerOffers
                     .AsNoTracking()
                     .AnyAsync(o => o.AuctionId == auction.Id && o.BidderId == winnerId && o.Status == AuctionWinnerOfferStatus.Accepted && !o.IsDeleted, cancellationToken);
-                var source = isSecondChance ? "SECOND_CHANCE" : "WINNER";
+                var source = settlement.IsBuyNow
+                    ? "BUY_NOW"
+                    : (isSecondChance ? "SECOND_CHANCE" : "WINNER");
 
                 var deposit = await db.AuctionDeposits
                     .AsNoTracking()
@@ -226,9 +228,11 @@ public sealed class CommerceSyncWorker : BackgroundService
                     .Select(d => new { d.Id, d.Amount })
                     .FirstOrDefaultAsync(cancellationToken);
 
+                var totalHeldAmount = (deposit?.Amount ?? 0m) + (settlement.IsBuyNow ? settlement.BuyNowGoodsAmount ?? 0m : 0m);
+
                 var payload = new CommerceSettlementPayload(
                     auction.Id, winningBidId, winnerId, auction.SellerId, auction.ProductId, skuId,
-                    productName, imageUrl, winningAmount, paymentDeadline, deposit?.Amount ?? 0m, source, deposit?.Id);
+                    productName, imageUrl, winningAmount, paymentDeadline, totalHeldAmount, source, deposit?.Id);
 
                 var commerce = scope.ServiceProvider.GetRequiredService<ICommerceClient>();
                 var orderId = await commerce.SendSettlementAsync(payload, cancellationToken);

@@ -26,6 +26,7 @@ public interface IAuctionDbContext
     DbSet<NotificationOutboxItem> NotificationOutbox { get; }
     DbSet<AuctionWatch> AuctionWatches { get; }
     DbSet<AuctionReport> AuctionReports { get; }
+    DbSet<SellerReservePenalty> SellerReservePenalties { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }

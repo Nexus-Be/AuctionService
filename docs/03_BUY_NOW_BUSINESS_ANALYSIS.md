@@ -30,15 +30,32 @@ Nếu thiết kế theo kiểu truyền thống: *Ai bấm Buy Now thì giữ su
 Thay vì cho **"Giữ chỗ trước, trả tiền sau"**, sàn Nexus áp dụng mô hình **Zero-wait Buy Now (Tiền trao cháo múc ngay trong 1 giây)** dựa trên nền tảng **Ví nội bộ Nexus** hiện có.
 
 ### 2.1. Quy tắc thiết lập & Điều kiện tồn tại của Buy Now
-1. **Quan hệ giá:** `BuyNowPrice > ReservePrice` (Giá Mua ngay bắt buộc phải cao hơn Giá sàn; khuyến nghị cách tối thiểu 1 bước giá để có ý nghĩa đấu giá).
-2. **Ngưỡng đóng Buy Now:** Tính năng Buy Now chỉ hoạt động khi phiên ở trạng thái `Running` và **giá bid hiện tại còn thấp hơn Giá sàn (`CurrentBid < ReservePrice`)**.
-   - Ngay khi có bất kỳ lượt bid nào chạm hoặc vượt Giá sàn (`CurrentBid >= ReservePrice`), nút Buy Now **tự động ẩn/đóng vĩnh viễn** cho phiên đó vì phiên đã đạt ngưỡng kỳ vọng của Seller và bước vào giai đoạn cạnh tranh giá thực sự.
+1. **Quan hệ giá (validate duy nhất):** `BuyNowPrice` là tùy chọn, do Seller tự nhập. Nếu có nhập thì bắt buộc `BuyNowPrice > ReservePrice` (hoặc `BuyNowPrice > StartPrice` nếu phiên không có Giá sàn). Hệ thống **không** áp thêm khoảng cách tối thiểu hay bội số.
+2. **Ngưỡng đóng Buy Now:** Buy Now chỉ hoạt động khi phiên ở trạng thái `Running` và:
+   - **Phiên có Giá sàn:** giá hiện tại còn thấp hơn Giá sàn (`CurrentBid < ReservePrice` hoặc chưa có bid). Khi có lượt bid chạm/vượt Giá sàn, nút Buy Now **đóng vĩnh viễn** cho phiên đó.
+   - **Phiên không có Giá sàn:** chỉ hoạt động khi **chưa có lượt bid nào**. Lượt bid đầu tiên sẽ đóng Buy Now (giống chuẩn eBay).
 
-### 2.2. Luồng xử lý cốt lõi khi bấm Buy Now
-1. Người mua bấm nút **Mua ngay** $\rightarrow$ Hệ thống mở **Popup xác nhận** (hiển thị rõ số tiền sẽ trừ từ Ví).
-2. Người mua bấm **Xác nhận thanh toán** $\rightarrow$ Backend kiểm tra điều kiện phiên + khóa phiên tức thì + thực hiện trừ/khóa đủ **100% giá Buy Now** từ Ví Nexus của người mua trong 1 giao dịch đồng bộ:
-   - **Nếu Ví đủ tiền:** Trừ/khóa tiền thành công $\rightarrow$ Phiên chuyển sang `Ended` (lý do `BuyNow`), người mua trở thành người thắng với đơn hàng **Đã thanh toán** (chờ Seller xác nhận giao hàng trong 24h). Toàn bộ tiền cọc của các bidder khác được **mở khóa hoàn trả 100% ngay lập tức**.
-   - **Nếu Ví KHÔNG đủ tiền:** Giao dịch bị từ chối ngay tại chỗ $\rightarrow$ Phiên **không bị khóa**, **không trừ uy tín**, **không giữ suất**. Nút Buy Now vẫn mở cho người khác hoặc chính họ nạp thêm tiền vào ví rồi quay lại bấm.
+### 2.2. Luồng xử lý cốt lõi khi bấm Buy Now (Buy Now = Thắng phiên ngay lập tức)
+Buy Now **không tạo loại đơn mới**, mà được coi như **người thắng phiên ngay lập tức** và đi tiếp **đúng luồng chốt phiên hiện có**. Tiền được tách thành **2 khoản riêng**:
+
+| Khoản | Thời điểm | Cách thu |
+| :--- | :--- | :--- |
+| **Tiền hàng (`BuyNowPrice`)** | Ngay khi bấm xác nhận | Khóa (Hold) trong Ví Nexus, được cấn trừ cọc đã đóng (nếu có) |
+| **Phí vận chuyển** | Trong 24h sau đó, lúc thanh toán đơn | Buyer trả khi checkout đơn trên Commerce (lúc này mới có địa chỉ để tính phí ship) |
+
+**Các bước:**
+1. Người mua bấm **Mua ngay** $\rightarrow$ mở **Popup xác nhận** (hiển thị số tiền sẽ khóa trong Ví và nhắc phí ship thanh toán sau).
+2. Người mua bấm **Xác nhận** (kèm `Idempotency-Key`) $\rightarrow$ Backend:
+   1. Kiểm tra quyền như lúc đóng cọc: không phải Seller, không bị ban, không bị hạn chế quyền đấu giá, đã xác minh tài khoản.
+   2. Kiểm tra lại phiên `Running` và Buy Now còn mở (dùng `RowVersion` chống tranh chấp với lượt bid / Buy Now khác — **không khóa phiên X phút**).
+   3. Hệ thống tính mức **tiền cọc theo uy tín (`5%–30%` của `StartPrice`)** nếu khách chưa đóng cọc, và khóa trong Ví **2 phần tách biệt**: (a) Khoản **Tiền cọc** (hoặc giữ nguyên khoản cọc đã đóng trước đó) và (b) Khoản **Tiền hàng còn lại** (`BuyNowPrice − Tiền cọc`).
+3. **Nếu Ví đủ tiền:**
+   - Phiên chuyển `Ended` (lý do `BuyNow`), người mua là người thắng với giá `BuyNowPrice`.
+   - Đẩy kết quả sang Commerce như người thắng bình thường (`Source = "BUY_NOW"`, khoản tiền hàng đã khóa được ghi nhận sẵn) $\rightarrow$ Commerce tạo đơn, Buyer chỉ còn phải trả **phí ship trong 24h**.
+   - Mở khóa hoàn 100% cọc cho **toàn bộ** bidder khác ngay lập tức (không giữ cọc Hạng 2).
+4. **Nếu Ví KHÔNG đủ tiền:** Từ chối ngay $\rightarrow$ phiên chạy tiếp, **không trừ uy tín**, **không giữ suất**.
+5. **Nếu Buyer không trả phí ship trong 24h:** Áp dụng luật bỏ kèo — **chỉ tịch thu đúng khoản Tiền cọc** (chia 70% Seller / 30% Sàn), trừ uy tín, tăng chuỗi vi phạm, và **mở khóa hoàn trả lại toàn bộ khoản Tiền hàng còn lại** về Ví cho Buyer. Không mời Hạng 2.
+6. **Lỗi giữa chừng (Ví đã khóa tiền nhưng lưu DB thất bại):** Đánh dấu khoản giữ cần giải tỏa và để job nền tự động trả lại tiền cho Buyer (giống cơ chế giải tỏa cọc hiện có).
 
 ---
 
@@ -49,7 +66,8 @@ Thay vì cho **"Giữ chỗ trước, trả tiền sau"**, sàn Nexus áp dụng
 | **Xung đột người khác bid vượt Buy Now trong lúc chờ trả tiền** | **Triệt tiêu 100%:** Không có khoảng chờ `X` phút nên không bao giờ xảy ra chuyện một người đang thanh toán mà người khác vẫn bid đè lên được. |
 | **Khóa phiên làm gián đoạn trải nghiệm người dùng** | **Không bao giờ khóa chờ:** Ai đủ tiền và bấm xác nhận trước thì phiên kết thúc luôn trong 1 giây; người không đủ tiền thì hệ thống từ chối ngay, phiên chạy tiếp bình thường không khựng lại 1 giây nào. |
 | **Lỗ hổng bấm Buy Now ảo để phá phiên** | **Không thể phá:** Muốn Buy Now thành công bắt buộc phải có sẵn 100% tiền thật trong Ví và bị trừ ngay lập tức. Không đủ tiền thì hệ thống từ chối luôn, không ảnh hưởng tới ai. |
-| **Phức tạp giữ cọc Hạng 2 & phạt uy tín bùng kèo** | **Đơn giản hóa tối đa:** Vì đơn Buy Now đã thu đủ 100% tiền ngay tại chỗ nên **không có rủi ro bùng thanh toán 24h**, không cần giữ lại cọc của Người về nhì (Hạng 2), giải phóng dòng tiền cho tất cả các bidder khác ngay lập tức. |
+| **Phức tạp giữ cọc Hạng 2 & phạt uy tín bùng kèo** | **Đơn giản hóa tối đa:** Đã khóa đủ 100% tiền hàng nên tỷ lệ bùng cực thấp; nếu quá 24h không trả phí ship thì chỉ thu đúng khoản Tiền cọc (hoàn trả phần tiền hàng còn lại), không cần giữ cọc Hạng 2. |
+| **Phải làm thêm loại đơn mới ở Commerce** | **Không cần:** Buy Now dùng lại luồng chốt phiên, giữ cọc, Outbox đang có; Commerce chỉ nhận thêm `Source = "BUY_NOW"`. |
 
 ---
 
@@ -61,7 +79,7 @@ Vì trong hệ thống Nexus hiện tại, **tiền cọc (`Deposit`) bản ch�
    - **CÓ.** Không cần bắt người mua đóng cọc trước rồi mới được Buy Now (giảm rào cản chốt đơn nhanh), miễn là **Số dư khả dụng trong Ví $\ge$ 100% `BuyNowPrice`** và tài khoản không phải Seller của phiên / không bị khóa quyền.
 2. **Người mua ĐÃ đóng cọc phiên đó thì tính số dư thế nào? (Tránh lỗi trừ nhầm 2 lần)**
    - Ví dụ: Giá Buy Now = `15.000.000 đ`. Ví khách có tổng `15.000.000 đ`, đã đóng cọc (đang Hold) `1.000.000 đ` $\rightarrow$ Số dư khả dụng hiển thị còn `14.000.000 đ`.
-   - Khi khách bấm Buy Now, hệ thống **PHẢI cấn trừ khoản cọc đang Hold**: chỉ kiểm tra và trừ thêm phần chênh lệch **`15.000.000 - 1.000.000 = 14.000.000 đ`** từ số dư khả dụng, đồng thời chuyển khoản cọc `1.000.000 đ` đang Hold sang thanh toán cho đơn Buy Now.
+   - Khi khách bấm Buy Now, hệ thống **PHẢI cấn trừ khoản cọc đang Hold**: chỉ kiểm tra và **khóa (Hold) thêm** phần chênh lệch **`15.000.000 - 1.000.000 = 14.000.000 đ`** từ số dư khả dụng, gộp cùng khoản `1.000.000 đ` đang Hold làm tiền hàng cho đơn Buy Now (phí ship thanh toán riêng trong 24h trên Commerce).
    - Nếu không cấn trừ khoản đang Hold, khách có đủ 15 triệu nhưng vẫn bị báo *"Không đủ số dư"*.
 
 ---
@@ -73,23 +91,23 @@ Vì trong hệ thống Nexus hiện tại, **tiền cọc (`Deposit`) bản ch�
 ### 5.1. Chính sách & UI nhắc nhẹ xuyên suốt (Từ lúc phiên `Scheduled`)
 Thông tin về **Giá Mua ngay** được hiển thị ngay từ khi phiên ở trạng thái `Scheduled` (Sắp diễn ra) cho tới khi có lượt bid chạm Giá sàn. Do đó:
 - **Trong phần Chính sách / Điều khoản tham gia đấu giá:** Cần bổ sung rõ quy tắc Buy Now:
-  > *"Tính năng Mua ngay cho phép sở hữu sản phẩm ngay lập tức bằng cách thanh toán trực tiếp 100% qua Ví Nexus (được cấn trừ tiền cọc nếu đã đóng). Tính năng này sẽ tự động đóng khi mức giá đấu chạm ngưỡng Giá sàn của người bán."*
+  > *"Tính năng Mua ngay cho phép sở hữu sản phẩm ngay lập tức bằng cách tạm khóa 100% tiền hàng trong Ví Nexus (được cấn trừ tiền cọc nếu đã đóng) và hoàn tất thanh toán phí vận chuyển trong vòng 24 giờ. Tính năng này sẽ tự động đóng khi mức giá đấu chạm ngưỡng Giá sàn (hoặc ngay ở lượt đặt giá đầu tiên nếu phiên không có Giá sàn)."*
 - **UI nhắc nhẹ ngay tại khu vực hiển thị Buy Now:**
-  - Khi phiên `Scheduled`: Hiển thị mức giá Mua ngay kèm trạng thái chờ mở phiên và dòng nhắc nhỏ (helper text / tooltip): *"Thanh toán tức thì qua Ví Nexus khi phiên mở. Tự động ẩn khi giá đấu đạt giá sàn."*
-  - Khi phiên `Running` (còn dưới giá sàn): Vẫn giữ dòng nhắc nhẹ ngắn gọn ngay dưới nút **Mua ngay** (ví dụ: *"Thanh toán ngay qua Ví Nexus • Tự đóng khi chạm giá sàn"*) để người dùng chủ động chuẩn bị sẵn tiền trong ví và hiểu vì sao nút này có thể biến mất bất cứ lúc nào nếu có người bid lên.
+  - Khi phiên `Scheduled`: Hiển thị mức giá Mua ngay kèm trạng thái chờ mở phiên và dòng nhắc nhỏ (helper text / tooltip): *"Khóa tiền hàng qua Ví Nexus khi phiên mở (trả phí ship sau 24h). Tự động ẩn khi đạt giá sàn."*
+  - Khi phiên `Running` (còn mở Buy Now): Vẫn giữ dòng nhắc nhẹ ngắn gọn ngay dưới nút **Mua ngay** (ví dụ: *"Khóa tiền hàng qua Ví Nexus • Tự đóng khi chạm giá sàn"*) để người dùng chủ động chuẩn bị sẵn tiền trong ví và hiểu vì sao nút này có thể biến mất bất cứ lúc nào nếu có người bid lên.
 
 ### 5.2. Ma trận hiển thị nút Buy Now theo trạng thái phiên
 
 | Trạng thái phiên | Điều kiện phụ | Hiển thị trên UI |
 | :--- | :--- | :--- |
 | **`Scheduled`** (Sắp diễn ra) | Phiên có cài `BuyNowPrice` | **Hiện thông tin Giá Mua ngay** (dạng badge/khối thông tin + nhắc nhẹ), nút bấm **Disabled** (hoặc ghi *"Mở bán khi phiên bắt đầu"*). |
-| **`Running`** (Đang diễn ra) | `CurrentBid < ReservePrice` (hoặc chưa có bid) **VÀ** người xem **không phải** Seller | **Hiện nút `Mua ngay (Giá X đ)` ở trạng thái Active**, cho phép bấm. |
+| **`Running`** (Đang diễn ra) | (**Có Giá sàn:** `CurrentBid < ReservePrice` hoặc chưa có bid; **Không Giá sàn:** `BidCount == 0`) **VÀ** người xem **không phải** Seller | **Hiện nút `Mua ngay (Giá X đ)` ở trạng thái Active**, cho phép bấm. |
 | **`Running`** (Đang diễn ra) | Người xem **là Seller** của chính phiên đó | **Ẩn nút Mua ngay** (hoặc disable hoàn toàn) — không cho phép tự mua sản phẩm của mình. |
 | **`Running`** (Đang diễn ra) | `CurrentBid >= ReservePrice` | **Ẩn / Đóng nút Mua ngay ngay lập tức**. Nếu người dùng đang mở màn hình lúc có người bid chạm sàn $\rightarrow$ ẩn nút realtime và hiện thông báo nhẹ: *"Giá đấu đã đạt giá sàn, tính năng Mua ngay đã đóng."* |
 | **`Ended` / `Cancelled`** | Bất kỳ | **Ẩn nút Mua ngay**. Nếu kết thúc do `BuyNow` $\rightarrow$ hiển thị rõ trạng thái *"Đã bán theo hình thức Mua ngay"*. |
 
-### 5.3. Luồng Modal Xác nhận (Bắt buộc trước khi gọi API trừ tiền)
-Vì Phương án 1 **trừ tiền Ví ngay lập tức**, FE **tuyệt đối không** gọi API Buy Now ngay khi vừa bấm nút ở ngoài màn hình, mà phải qua **1 bước Popup xác nhận**:
+### 5.3. Luồng Modal Xác nhận (Bắt buộc trước khi gọi API khóa tiền)
+Vì Buy Now **khóa tiền hàng trong Ví ngay lập tức**, FE **tuyệt đối không** gọi API Buy Now ngay khi vừa bấm nút ở ngoài màn hình, mà phải qua **1 bước Popup xác nhận**:
 
 ```text
 [Bấm nút "Mua ngay"]
@@ -98,8 +116,10 @@ Vì Phương án 1 **trừ tiền Ví ngay lập tức**, FE **tuyệt đối kh
 [Mở Modal Xác nhận Mua ngay]
   • Giá Mua ngay:                 15.000.000 đ
   • Tiền cọc đã đóng (nếu có):    - 1.000.000 đ
-  • Số tiền trừ từ Ví khả dụng:   14.000.000 đ
+  • Số tiền khóa từ Ví khả dụng:  14.000.000 đ
   • Số dư Ví khả dụng hiện tại:   XX.XXX.XXX đ
+  • Lưu ý: Phí vận chuyển thanh toán riêng trong 24h khi checkout đơn.
+    Nếu quá hạn không hoàn tất thanh toán phí ship, hệ thống sẽ tịch thu phần tiền cọc (và hoàn trả phần tiền hàng còn lại).
         │
         ├──► Nếu Ví khả dụng < Số tiền cần trừ:
         │       - Khóa nút "Xác nhận thanh toán"
@@ -112,6 +132,8 @@ Vì Phương án 1 **trừ tiền Ví ngay lập tức**, FE **tuyệt đối kh
 ```
 
 ### 5.4. Xử lý Realtime & Các tình huống lỗi từ Backend
+**Dữ liệu realtime cần có:** Sự kiện `BidPlaced` bổ sung cờ `isReserveMet` và `buyNowAvailable`; sự kiện `AuctionStatusChanged` bổ sung lý do kết thúc (`BuyNow`) để FE đóng nút / Modal ngay.
+
 FE cần lắng nghe sự kiện realtime (SignalR/WebSocket) và bắt các trường hợp lỗi sau để cập nhật UI mượt mà (đặc biệt là các ca **cùng bấm trong 1 mili-giây**):
 
 1. **Đã có người Buy Now trước đó 1 giây:**

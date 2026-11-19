@@ -12,5 +12,7 @@ public enum AuctionSettlementStatus
     /// <summary>Thanh toán đã hết hạn.</summary>
     Expired = 3,
     /// <summary>Settlement đã bị huỷ.</summary>
-    Cancelled = 4
+    Cancelled = 4,
+    /// <summary>Hết giờ nhưng giá cao nhất chưa đạt giá sàn, đang chờ Seller duyệt trong 12 giờ.</summary>
+    AwaitingSellerApproval = 5
 }

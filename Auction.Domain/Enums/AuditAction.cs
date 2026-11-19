@@ -23,5 +23,8 @@ public enum AuditAction
     DepositRelease = 18,
     DepositReconcile = 19,
     AuctionReportCreate = 20,
-    AuctionReportResolve = 21
+    AuctionReportResolve = 21,
+    AuctionBuyNow = 22,
+    ReserveApprovalAccept = 23,
+    ReserveApprovalDecline = 24
 }

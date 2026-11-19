@@ -125,4 +125,20 @@ public interface IAuctionService
     /// <summary>Admin/Staff đánh dấu các báo cáo của phiên là không có sai phạm và gửi phản hồi cho người tố cáo.</summary>
     Task<DismissAuctionReportsResponse> DismissReportsAsync(
         ActorContext actor, Guid auctionId, DismissAuctionReportsRequest? request, CancellationToken cancellationToken = default);
+
+    /// <summary>Buyer bấm Mua ngay (Buy Now): khóa đủ tiền hàng (tách cọc + tiền hàng còn lại) và chốt thắng phiên ngay lập tức.</summary>
+    Task<BuyNowResponse> BuyNowAsync(
+        ActorContext actor, Guid auctionId, string? idempotencyKey, long? expectedRowVersion, CancellationToken cancellationToken = default);
+
+    /// <summary>Seller đồng ý bán dưới giá sàn trong vòng 12 giờ sau khi phiên kết thúc (reset chuỗi từ chối về 0).</summary>
+    Task<ReserveApprovalResponse> ApproveBelowReserveAsync(
+        ActorContext actor, Guid auctionId, CancellationToken cancellationToken = default);
+
+    /// <summary>Seller từ chối bán dưới giá sàn trong vòng 12 giờ (tăng chuỗi từ chối; đủ 3 lần khóa quyền đặt giá sàn 14 ngày).</summary>
+    Task<ReserveApprovalResponse> RejectBelowReserveAsync(
+        ActorContext actor, Guid auctionId, RejectBelowReserveRequest? request, CancellationToken cancellationToken = default);
+
+    /// <summary>Seller xem trạng thái giới hạn quyền đặt Giá sàn của mình.</summary>
+    Task<SellerReserveStatusResponse> GetSellerReserveStatusAsync(
+        Guid sellerId, CancellationToken cancellationToken = default);
 }

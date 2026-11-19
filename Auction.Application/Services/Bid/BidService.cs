@@ -366,13 +366,17 @@ public sealed class BidService : IBidService
                 "CONCURRENT_UPDATE", "The auction changed while the bid was being saved. Reload it and try again.", 409);
         }
 
+        var isReserveMet = auction.ReservePriceAmount is null || amount >= auction.ReservePriceAmount.Value;
+        var buyNowAvailable = AuctionRules.IsBuyNowAvailable(
+            state.Status, auction.ReservePriceAmount, auction.BuyNowPriceAmount, amount, state.BidCount);
+
         // Lượt đặt giá đã được lưu: báo cho người đang xem phiên. Không chạy khi replay idempotent vì nhánh đó đã return trước đó.
         await _notifier.BidPlacedAsync(
             auctionId,
             new BidPlacedMessage(
                 auctionId, bid.Id, bidSeq, amount, amount,
                 state.BidCount, now, state.ScheduledEndAt, state.ExtensionCount,
-                previousPriceAmount, state.RowVersion),
+                previousPriceAmount, state.RowVersion, isReserveMet, buyNowAvailable),
             CancellationToken.None);
 
         return response;

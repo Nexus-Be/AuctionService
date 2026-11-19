@@ -34,6 +34,7 @@ public sealed class AuctionService : IAuctionService
     private readonly IAuctionDbContext _dbContext;
     private readonly ICatalogClient _catalog;
     private readonly IUserClient _users;
+    private readonly IWalletClient _wallet;
     private readonly TimeProvider _clock;
     private readonly IAuctionNotifier _notifier;
     private readonly INotificationClient _notifications;
@@ -41,14 +42,15 @@ public sealed class AuctionService : IAuctionService
     private readonly ICommerceSync _commerceSync;
     private readonly IDepositService _deposits;
 
-    /// <summary>Khởi tạo service với DbContext, các client gọi Catalog và User, đồng hồ hệ thống, bộ thông báo realtime và service cọc.</summary>
+    /// <summary>Khởi tạo service với DbContext, các client gọi Catalog, User và Wallet, đồng hồ hệ thống, bộ thông báo realtime và service cọc.</summary>
     public AuctionService(
-        IAuctionDbContext dbContext, ICatalogClient catalog, IUserClient users, TimeProvider clock, IAuctionNotifier notifier,
+        IAuctionDbContext dbContext, ICatalogClient catalog, IUserClient users, IWalletClient wallet, TimeProvider clock, IAuctionNotifier notifier,
         INotificationClient notifications, ICatalogSync catalogSync, ICommerceSync commerceSync, IDepositService deposits)
     {
         _dbContext = dbContext;
         _catalog = catalog;
         _users = users;
+        _wallet = wallet;
         _clock = clock;
         _notifier = notifier;
         _notifications = notifications;
@@ -824,6 +826,523 @@ public sealed class AuctionService : IAuctionService
         return new DismissAuctionReportsResponse(auctionId, pendingReports.Count, note, now);
     }
 
+    // ------------------------------------------------------------------ Buy Now & Below-Reserve Approval
+
+    /// <summary>
+    /// Buyer bấm Mua ngay (Buy Now): khóa đủ tiền hàng (tách Tiền cọc + Tiền hàng còn lại) qua Ví Nexus,
+    /// chuyển phiên sang Ended (BuyNow), giải tỏa cọc toàn bộ bidder khác và đẩy sang Commerce (trả phí ship trong 24h).
+    /// </summary>
+    public async Task<BuyNowResponse> BuyNowAsync(
+        ActorContext actor, Guid auctionId, string? idempotencyKey, long? expectedRowVersion,
+        CancellationToken cancellationToken = default)
+    {
+        var now = _clock.GetUtcNow();
+        if (auctionId == Guid.Empty)
+            throw Invalid("VAL_INVALID_IDENTIFIER", "Auction ID is required.");
+        BidRules.ValidateIdempotencyKey(idempotencyKey);
+
+        var key = idempotencyKey!.Trim();
+        var requestHash = $"{auctionId:N}|{actor.UserId:N}|BUYNOW";
+        var saved = await _dbContext.IdempotencyKeys
+            .AsNoTracking()
+            .FirstOrDefaultAsync(k => k.Key == key && k.Scope == IdempotencyScope.BuyNow && k.ExpiresAt > now, cancellationToken);
+        if (saved is not null)
+        {
+            if (saved.RequestHash != requestHash)
+                throw new BusinessRuleValidationException(
+                    "IDEMPOTENCY_KEY_REUSED", "The Idempotency-Key was already used with a different request.", 422);
+
+            if (!string.IsNullOrWhiteSpace(saved.ResponseBody))
+            {
+                var body = JsonSerializer.Deserialize<BuyNowResponse>(saved.ResponseBody, JsonOptions);
+                if (body is not null)
+                    return body;
+            }
+        }
+
+        var auction = await _dbContext.Auctions
+            .Include(a => a.AuctionState)
+            .Include(a => a.AuctionResult)
+            .Include(a => a.AuctionSettlement)
+            .FirstOrDefaultAsync(a => a.Id == auctionId && !a.IsDeleted, cancellationToken);
+        if (auction?.AuctionState is null)
+            throw NotFound(auctionId);
+
+        if (auction.SellerId == actor.UserId)
+            throw new DomainException("SELLER_CANNOT_BID_OWN_AUCTION", "A seller cannot buy their own auction.", 403);
+
+        var state = auction.AuctionState;
+        if (expectedRowVersion is { } expected && state.RowVersion != expected)
+            throw new DomainException("CONCURRENT_UPDATE", "The auction changed before Buy Now could be completed. Reload and try again.", 409);
+
+        if (state.Status != AuctionStatus.Running || now >= state.ScheduledEndAt)
+            throw new DomainException("AUCTION_NOT_RUNNING", "Buy Now is only available while the auction is running.", 409);
+
+        if (auction.BuyNowPriceAmount is not { } buyNowPrice)
+            throw new DomainException("BUY_NOW_NOT_CONFIGURED", "This auction does not have a Buy Now price.", 409);
+
+        if (!AuctionRules.IsBuyNowAvailable(state.Status, auction.ReservePriceAmount, auction.BuyNowPriceAmount, state.CurrentPriceAmount, state.BidCount))
+            throw new DomainException("BUY_NOW_NOT_AVAILABLE", "Buy Now is no longer available because bidding has reached the threshold.", 409);
+
+        var profile = await _users.GetAuctionDepositProfileAsync(actor.UserId, bypassCache: true, cancellationToken);
+        DepositProfileGuard.EnsureCanJoin(profile);
+
+        var existingDeposit = await _dbContext.AuctionDeposits
+            .FirstOrDefaultAsync(d => d.AuctionId == auctionId && d.BidderId == actor.UserId && !d.IsDeleted, cancellationToken);
+        if (existingDeposit is { ReleasePending: true })
+            throw new DomainException("DEPOSIT_RELEASE_PENDING", "Your previous payment hold is still being released. Try again shortly.", 409);
+
+        var policy = await DepositPolicyReader.ReadAsync(_dbContext, cancellationToken);
+        decimal depositAmount;
+        string? newlyCreatedDepositHoldId = null;
+        AuctionDeposit depositEntity;
+
+        if (existingDeposit is { Status: DepositStatus.Authorized })
+        {
+            depositEntity = existingDeposit;
+            depositAmount = Math.Min(existingDeposit.Amount, buyNowPrice);
+        }
+        else
+        {
+            var quote = DepositRules.Calculate(
+                policy, auction.StartPriceAmount, profile.ReputationScore, profile.IsNewUser, profile.ViolationStreak);
+            depositAmount = Math.Min(quote.Amount, buyNowPrice);
+
+            if (existingDeposit is null)
+            {
+                depositEntity = new AuctionDeposit
+                {
+                    Id = Guid.NewGuid(),
+                    AuctionId = auctionId,
+                    BidderId = actor.UserId,
+                    Amount = depositAmount,
+                    RatePercent = quote.RatePercent,
+                    PolicyVersion = policy.Version,
+                    Status = DepositStatus.Pending,
+                    AttemptCount = 1,
+                    CreatedAt = now,
+                    UpdatedAt = now
+                };
+                _dbContext.AuctionDeposits.Add(depositEntity);
+            }
+            else
+            {
+                depositEntity = existingDeposit;
+                depositEntity.Amount = depositAmount;
+                depositEntity.RatePercent = quote.RatePercent;
+                depositEntity.PolicyVersion = policy.Version;
+                depositEntity.Status = DepositStatus.Pending;
+                depositEntity.AttemptCount += 1;
+                depositEntity.ReleasedAt = null;
+                depositEntity.ReleaseReason = null;
+                depositEntity.ReleasePending = false;
+                depositEntity.PendingAction = DepositPendingAction.None;
+                depositEntity.FailureCode = null;
+                depositEntity.UpdatedAt = now;
+            }
+
+            var depHold = await _wallet.CreateDepositHoldAsync(
+                new CreateDepositHoldCommand(
+                    depositEntity.Id, actor.UserId, depositAmount, DepositRules.Currency, auctionId, policy.Version),
+                $"buynow-dep:{depositEntity.Id:N}:{depositEntity.AttemptCount}",
+                cancellationToken);
+            if (depHold.Status != DepositHoldState.Authorized)
+                throw new DomainException("DEPOSIT_HOLD_NOT_ACTIVE", "Could not lock the Buy Now deposit in your wallet.", 409);
+
+            newlyCreatedDepositHoldId = depHold.HoldId;
+            depositEntity.GatewayReference = depHold.HoldId;
+            depositEntity.Status = DepositStatus.Authorized;
+            depositEntity.AuthorizedAt = depHold.AuthorizedAt ?? now;
+            depositEntity.UpdatedAt = now;
+            depositEntity.RowVersion += 1;
+        }
+
+        var remainingGoodsAmount = Math.Max(0m, buyNowPrice - depositAmount);
+        Guid? goodsDepositId = null;
+        string? goodsHoldId = null;
+
+        if (remainingGoodsAmount > 0m)
+        {
+            goodsDepositId = Guid.NewGuid();
+            try
+            {
+                var goodsHold = await _wallet.CreateDepositHoldAsync(
+                    new CreateDepositHoldCommand(
+                        goodsDepositId.Value, actor.UserId, remainingGoodsAmount, DepositRules.Currency, auctionId, policy.Version),
+                    $"buynow-goods:{auctionId:N}:{actor.UserId:N}:{key}",
+                    cancellationToken);
+                if (goodsHold.Status != DepositHoldState.Authorized)
+                    throw new DomainException("BUY_NOW_HOLD_FAILED", "Could not lock the remaining Buy Now amount in your wallet.", 409);
+
+                goodsHoldId = goodsHold.HoldId;
+            }
+            catch
+            {
+                if (newlyCreatedDepositHoldId is not null)
+                {
+                    try
+                    {
+                        await _wallet.ReleaseDepositHoldAsync(
+                            newlyCreatedDepositHoldId, "BUY_NOW_ABORTED", $"buynow-abort-dep:{depositEntity.Id:N}", CancellationToken.None);
+                    }
+                    catch
+                    {
+                    }
+                }
+                throw;
+            }
+        }
+
+        var fromStatus = state.Status;
+        var paymentDeadline = now.Add(WinnerPaymentWindow);
+
+        state.Status = AuctionStatus.Ended;
+        state.EndedAt = now;
+        state.CurrentWinnerId = actor.UserId;
+        state.CurrentPriceAmount = buyNowPrice;
+        state.UpdatedAt = now;
+        state.RowVersion += 1;
+
+        var result = auction.AuctionResult;
+        if (result is null)
+        {
+            result = new AuctionResult
+            {
+                Id = Guid.NewGuid(),
+                AuctionId = auctionId,
+                DeterminedAt = now,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            _dbContext.AuctionResults.Add(result);
+        }
+        result.WinnerId = actor.UserId;
+        result.WinningBidId = null;
+        result.FinalPriceAmount = buyNowPrice;
+        result.DeterminedAt = now;
+        result.UpdatedAt = now;
+
+        var settlement = auction.AuctionSettlement;
+        if (settlement is null)
+        {
+            settlement = new AuctionSettlement
+            {
+                Id = Guid.NewGuid(),
+                AuctionId = auctionId,
+                Status = AuctionSettlementStatus.PendingPayment,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            _dbContext.AuctionSettlements.Add(settlement);
+        }
+        settlement.WinnerId = actor.UserId;
+        settlement.WinningBidId = null;
+        settlement.Status = AuctionSettlementStatus.PendingPayment;
+        settlement.PaymentDeadlineAt = paymentDeadline;
+        settlement.IsBuyNow = true;
+        settlement.IsBelowReserve = false;
+        settlement.BuyNowGoodsDepositId = goodsDepositId;
+        settlement.BuyNowGoodsHoldId = goodsHoldId;
+        settlement.BuyNowGoodsAmount = remainingGoodsAmount > 0m ? remainingGoodsAmount : null;
+        settlement.BuyNowGoodsPendingAction = DepositPendingAction.None;
+        settlement.UpdatedAt = now;
+
+        var depositsToRelease = await _dbContext.AuctionDeposits
+            .Where(d => d.AuctionId == auctionId && d.BidderId != actor.UserId && !d.IsDeleted &&
+                        (d.Status == DepositStatus.Authorized || d.Status == DepositStatus.Pending))
+            .ToListAsync(cancellationToken);
+        foreach (var other in depositsToRelease)
+        {
+            other.Status = DepositStatus.Released;
+            other.ReleasePending = true;
+            other.PendingAction = DepositPendingAction.Release;
+            other.ReleaseReason = "AUCTION_ENDED_BUY_NOW";
+            other.NextRetryAt = now;
+            other.NeedsAttention = false;
+            other.UpdatedAt = now;
+            other.RowVersion += 1;
+        }
+
+        _dbContext.AuctionStatusHistories.Add(new AuctionStatusHistory
+        {
+            Id = Guid.NewGuid(),
+            AuctionId = auctionId,
+            FromStatus = fromStatus,
+            ToStatus = AuctionStatus.Ended,
+            Reason = "Auction closed immediately via Buy Now.",
+            ChangedBy = actor.UserId,
+            ChangedAt = now,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+
+        var response = new BuyNowResponse(
+            auctionId, actor.UserId, buyNowPrice, depositAmount, remainingGoodsAmount,
+            state.Status, now, paymentDeadline, state.RowVersion);
+
+        _dbContext.IdempotencyKeys.Add(new IdempotencyKey
+        {
+            Id = Guid.NewGuid(),
+            Key = key,
+            Scope = IdempotencyScope.BuyNow,
+            RequestHash = requestHash,
+            ResponseStatus = 200,
+            ResponseBody = JsonSerializer.Serialize(response, JsonOptions),
+            ExpiresAt = now.Add(SettlementIdempotencyLifetime),
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+
+        _dbContext.AddAuditLog(
+            AuditAction.AuctionBuyNow, "Auction", auctionId.ToString(),
+            oldValues: new { status = fromStatus.ToString() },
+            newValues: new { status = state.Status.ToString(), buyerId = actor.UserId, buyNowPrice, depositAmount, remainingGoodsAmount },
+            userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+
+        _notifications.NotifyAuctionWinner(new AuctionWinnerNotification(
+            auctionId, auction.SnapshotProductTitle, result.Id, result.Id,
+            actor.UserId, auction.SellerId, buyNowPrice, now, paymentDeadline));
+
+        try
+        {
+            await SaveAsync(null, cancellationToken);
+        }
+        catch
+        {
+            // Compensating release if DB commit failed after locking wallet funds.
+            if (goodsHoldId is not null)
+            {
+                try { await _wallet.ReleaseDepositHoldAsync(goodsHoldId, "BUY_NOW_DB_FAILED", $"buynow-abort-goods:{goodsDepositId:N}", CancellationToken.None); }
+                catch { }
+            }
+            if (newlyCreatedDepositHoldId is not null)
+            {
+                try { await _wallet.ReleaseDepositHoldAsync(newlyCreatedDepositHoldId, "BUY_NOW_DB_FAILED", $"buynow-abort-dep2:{depositEntity.Id:N}", CancellationToken.None); }
+                catch { }
+            }
+            throw;
+        }
+
+        if (depositsToRelease.Count > 0)
+            await _deposits.ReleasePendingDepositsForAuctionAsync(auctionId, cancellationToken);
+
+        _commerceSync.PushSettlement(auctionId);
+
+        await _notifier.AuctionStatusChangedAsync(
+            auctionId, new AuctionStatusChangedMessage(auctionId, state.Status.ToString(), now, "BuyNow"), CancellationToken.None);
+
+        return response;
+    }
+
+    /// <summary>Seller đồng ý bán dưới giá sàn trong vòng 12 giờ: tạo đơn cho Hạng 1 (24h thanh toán) và reset chuỗi từ chối về 0.</summary>
+    public async Task<ReserveApprovalResponse> ApproveBelowReserveAsync(
+        ActorContext actor, Guid auctionId, CancellationToken cancellationToken = default)
+    {
+        if (auctionId == Guid.Empty)
+            throw Invalid("VAL_INVALID_IDENTIFIER", "Auction ID is required.");
+
+        var now = _clock.GetUtcNow();
+        var auction = await _dbContext.Auctions
+            .Include(a => a.AuctionState)
+            .Include(a => a.AuctionResult)
+            .Include(a => a.AuctionSettlement)
+            .FirstOrDefaultAsync(a => a.Id == auctionId && !a.IsDeleted, cancellationToken);
+        if (auction?.AuctionState is null)
+            throw NotFound(auctionId);
+
+        EnsureOwner(auction, actor, "approve below-reserve sale");
+
+        var settlement = auction.AuctionSettlement;
+        if (auction.AuctionState.Status != AuctionStatus.Ended
+            || settlement is null
+            || settlement.Status != AuctionSettlementStatus.AwaitingSellerApproval)
+        {
+            throw new DomainException("NOT_AWAITING_SELLER_APPROVAL", "This auction is not awaiting seller reserve approval.", 409);
+        }
+
+        if (settlement.SellerApprovalDeadlineAt is { } deadline && deadline <= now)
+            throw new DomainException("SELLER_APPROVAL_EXPIRED", "The 12-hour seller approval window has expired.", 409);
+
+        var paymentDeadline = now.Add(WinnerPaymentWindow);
+        settlement.Status = AuctionSettlementStatus.PendingPayment;
+        settlement.PaymentDeadlineAt = paymentDeadline;
+        settlement.UpdatedAt = now;
+
+        // Reset seller's consecutive decline streak ONLY when they approve a below-reserve sale.
+        var penalty = await _dbContext.SellerReservePenalties
+            .FirstOrDefaultAsync(p => p.SellerId == auction.SellerId && !p.IsDeleted, cancellationToken);
+        if (penalty is not null)
+        {
+            penalty.ConsecutiveDeclineCount = 0;
+            penalty.UpdatedAt = now;
+        }
+
+        _dbContext.AddAuditLog(
+            AuditAction.ReserveApprovalAccept, "Auction", auctionId.ToString(),
+            oldValues: new { settlementStatus = AuctionSettlementStatus.AwaitingSellerApproval.ToString() },
+            newValues: new { settlementStatus = settlement.Status.ToString(), acceptedPrice = auction.AuctionResult?.FinalPriceAmount, paymentDeadline },
+            userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+
+        if (auction.AuctionResult is { } res && res.WinnerId is { } winId && res.WinningBidId is { } winBidId)
+        {
+            _notifications.NotifyAuctionWinner(new AuctionWinnerNotification(
+                auctionId, auction.SnapshotProductTitle, res.Id, winBidId, winId,
+                auction.SellerId, res.FinalPriceAmount ?? 0m, now, paymentDeadline));
+        }
+
+        await SaveAsync(null, cancellationToken);
+        _commerceSync.PushSettlement(auctionId);
+
+        return new ReserveApprovalResponse(
+            auctionId, auction.AuctionState.Status, settlement.Status, auction.AuctionResult?.FinalPriceAmount,
+            paymentDeadline, penalty?.ConsecutiveDeclineCount ?? 0, penalty?.ReserveRestrictedUntil, now);
+    }
+
+    /// <summary>Seller từ chối bán dưới giá sàn trong vòng 12 giờ: đóng phiên Failed, hoàn cọc Hạng 1, tăng chuỗi từ chối (đủ 3 lần khóa 14 ngày).</summary>
+    public async Task<ReserveApprovalResponse> RejectBelowReserveAsync(
+        ActorContext actor, Guid auctionId, RejectBelowReserveRequest? request, CancellationToken cancellationToken = default)
+    {
+        if (auctionId == Guid.Empty)
+            throw Invalid("VAL_INVALID_IDENTIFIER", "Auction ID is required.");
+
+        var now = _clock.GetUtcNow();
+        var auction = await _dbContext.Auctions
+            .Include(a => a.AuctionState)
+            .Include(a => a.AuctionSettlement)
+            .FirstOrDefaultAsync(a => a.Id == auctionId && !a.IsDeleted, cancellationToken);
+        if (auction?.AuctionState is null)
+            throw NotFound(auctionId);
+
+        EnsureOwner(auction, actor, "decline below-reserve sale");
+
+        var state = auction.AuctionState;
+        var settlement = auction.AuctionSettlement;
+        if (state.Status != AuctionStatus.Ended
+            || settlement is null
+            || settlement.Status != AuctionSettlementStatus.AwaitingSellerApproval)
+        {
+            throw new DomainException("NOT_AWAITING_SELLER_APPROVAL", "This auction is not awaiting seller reserve approval.", 409);
+        }
+
+        var reason = string.IsNullOrWhiteSpace(request?.Reason)
+            ? "ReserveNotMet: Seller declined to sell below the reserve price."
+            : $"ReserveNotMet: {request.Reason.Trim()}";
+        if (reason.Length > MaxReasonLength)
+            reason = reason[..MaxReasonLength];
+
+        settlement.Status = AuctionSettlementStatus.Cancelled;
+        settlement.UpdatedAt = now;
+
+        state.Status = AuctionStatus.Failed;
+        state.UpdatedAt = now;
+        state.RowVersion += 1;
+
+        auction.StockReleaseState = BackgroundSyncState.Pending;
+        auction.NextRetryAt = now;
+        auction.NeedsAttention = false;
+        auction.UpdatedAt = now;
+
+        var openAuction = await _dbContext.ProductOpenAuctions
+            .FirstOrDefaultAsync(p => p.AuctionId == auctionId, cancellationToken);
+        if (openAuction is not null)
+            _dbContext.ProductOpenAuctions.Remove(openAuction);
+
+        var depositsToRelease = await MarkDepositsForReleaseAsync(auctionId, "RESERVE_NOT_MET", now, actor, cancellationToken);
+
+        var penalty = await _dbContext.SellerReservePenalties
+            .FirstOrDefaultAsync(p => p.SellerId == auction.SellerId && !p.IsDeleted, cancellationToken);
+        if (penalty is null)
+        {
+            penalty = new SellerReservePenalty
+            {
+                Id = Guid.NewGuid(),
+                SellerId = auction.SellerId,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            _dbContext.SellerReservePenalties.Add(penalty);
+        }
+        penalty.ConsecutiveDeclineCount += 1;
+        if (penalty.ConsecutiveDeclineCount >= AuctionRules.MaxConsecutiveReserveDeclines)
+            penalty.ReserveRestrictedUntil = now.AddDays(AuctionRules.ReserveRestrictionDays);
+        penalty.UpdatedAt = now;
+
+        _dbContext.AuctionStatusHistories.Add(new AuctionStatusHistory
+        {
+            Id = Guid.NewGuid(),
+            AuctionId = auctionId,
+            FromStatus = AuctionStatus.Ended,
+            ToStatus = AuctionStatus.Failed,
+            Reason = reason,
+            ChangedBy = actor.UserId,
+            ChangedAt = now,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+
+        _dbContext.AddAuditLog(
+            AuditAction.ReserveApprovalDecline, "Auction", auctionId.ToString(),
+            oldValues: new { status = AuctionStatus.Ended.ToString(), settlementStatus = AuctionSettlementStatus.AwaitingSellerApproval.ToString() },
+            newValues: new { status = AuctionStatus.Failed.ToString(), settlementStatus = settlement.Status.ToString(), consecutiveDeclineCount = penalty.ConsecutiveDeclineCount, restrictedUntil = penalty.ReserveRestrictedUntil },
+            userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+
+        _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+            auctionId, auction.SellerId, auction.SnapshotProductTitle, reason, now, actor.TraceId));
+
+        await SaveAsync(null, cancellationToken);
+
+        if (depositsToRelease > 0)
+            await _deposits.ReleasePendingDepositsForAuctionAsync(auctionId, cancellationToken);
+
+        _catalogSync.UnlockProduct(auction.ProductId, auctionId);
+        await _notifier.AuctionStatusChangedAsync(
+            auctionId, new AuctionStatusChangedMessage(auctionId, AuctionStatus.Failed.ToString(), now, "ReserveNotMet"), CancellationToken.None);
+
+        return new ReserveApprovalResponse(
+            auctionId, state.Status, settlement.Status, null, null,
+            penalty.ConsecutiveDeclineCount, penalty.ReserveRestrictedUntil, now);
+    }
+
+    /// <summary>Seller xem trạng thái chuỗi từ chối dưới giá sàn và thời hạn bị khóa quyền đặt Giá sàn (nếu có).</summary>
+    public async Task<SellerReserveStatusResponse> GetSellerReserveStatusAsync(
+        Guid sellerId, CancellationToken cancellationToken = default)
+    {
+        var now = _clock.GetUtcNow();
+        var penalty = await _dbContext.SellerReservePenalties
+            .AsNoTracking()
+            .FirstOrDefaultAsync(p => p.SellerId == sellerId && !p.IsDeleted, cancellationToken);
+
+        var isRestricted = penalty?.ReserveRestrictedUntil is { } until && until > now;
+        var count = penalty is not null && !isRestricted && penalty.ReserveRestrictedUntil <= now
+            ? 0
+            : penalty?.ConsecutiveDeclineCount ?? 0;
+
+        return new SellerReserveStatusResponse(
+            sellerId,
+            count,
+            isRestricted,
+            isRestricted ? penalty!.ReserveRestrictedUntil : null);
+    }
+
+    private async Task EnsureSellerCanSetReservePriceAsync(
+        Guid sellerId, decimal? reservePriceAmount, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (reservePriceAmount is null)
+            return;
+
+        var penalty = await _dbContext.SellerReservePenalties
+            .AsNoTracking()
+            .FirstOrDefaultAsync(p => p.SellerId == sellerId && !p.IsDeleted, cancellationToken);
+
+        if (penalty?.ReserveRestrictedUntil is { } until && until > now)
+        {
+            throw new BusinessRuleValidationException(
+                "RESERVE_PRICE_RESTRICTED",
+                $"Setting a reserve price is temporarily restricted until {until:yyyy-MM-dd HH:mm} UTC due to consecutive below-reserve rejections.",
+                422);
+        }
+    }
+
     /// <summary>Lấy số liệu thống kê các phiên thành công và thất bại của seller.</summary>
     public async Task<SellerAuctionStatisticsDto> GetSellerAuctionStatisticsAsync(
         Guid sellerId, CancellationToken cancellationToken = default)
@@ -1499,8 +2018,12 @@ public sealed class AuctionService : IAuctionService
                 .AnyAsync(o => o.AuctionId == auctionId && o.BidderId == winnerId && o.Status == AuctionWinnerOfferStatus.Accepted, cancellationToken);
 
         AuctionWinnerOffer? offer = null;
-        if (paymentStatus is SettlementPaymentStatus.Expired or SettlementPaymentStatus.PaymentTimedOut or SettlementPaymentStatus.Failed)
+        if (paymentStatus is SettlementPaymentStatus.Expired or SettlementPaymentStatus.PaymentTimedOut or SettlementPaymentStatus.Failed
+            && !auction.AuctionSettlement.IsBuyNow
+            && !auction.AuctionSettlement.IsBelowReserve)
+        {
             offer = await TryCreateWinnerOfferAsync(auctionId, auction.ProductId, winnerId, now, cancellationToken);
+        }
 
         // Đặt việc nền trong cùng transaction (Overview 4.1 & quy tắc giữ cọc Top 2):
         // - Paid: báo User reset Streak (API 25) + Capture cọc OrderPayment của người vừa thanh toán (Winner hoặc Người về nhì).
@@ -1510,6 +2033,9 @@ public sealed class AuctionService : IAuctionService
             auction.StreakResetState = BackgroundSyncState.Pending;
             auction.NextRetryAt = now;
             auction.NeedsAttention = false;
+
+            if (auction.AuctionSettlement.IsBuyNow && !string.IsNullOrWhiteSpace(auction.AuctionSettlement.BuyNowGoodsHoldId))
+                auction.AuctionSettlement.BuyNowGoodsPendingAction = DepositPendingAction.Capture;
 
             var winnerDeposit = await _dbContext.AuctionDeposits
                 .FirstOrDefaultAsync(d => d.AuctionId == auctionId && d.BidderId == winnerId && !d.IsDeleted, cancellationToken);
@@ -1533,6 +2059,10 @@ public sealed class AuctionService : IAuctionService
             auction.NextRetryAt = now;
             auction.NeedsAttention = false;
 
+            // Buy Now non-payment forfeits only the deposit and returns the remaining goods hold back to the buyer.
+            if (auction.AuctionSettlement.IsBuyNow && !string.IsNullOrWhiteSpace(auction.AuctionSettlement.BuyNowGoodsHoldId))
+                auction.AuctionSettlement.BuyNowGoodsPendingAction = DepositPendingAction.Release;
+
             var winnerDeposit = await _dbContext.AuctionDeposits
                 .FirstOrDefaultAsync(d => d.AuctionId == auctionId && d.BidderId == winnerId && !d.IsDeleted, cancellationToken);
             if (winnerDeposit is not null && winnerDeposit.Status == DepositStatus.Authorized)
@@ -1544,6 +2074,12 @@ public sealed class AuctionService : IAuctionService
                 winnerDeposit.UpdatedAt = now;
                 winnerDeposit.RowVersion += 1;
             }
+        }
+        else if (paymentStatus == SettlementPaymentStatus.Cancelled
+                 && auction.AuctionSettlement.IsBuyNow
+                 && !string.IsNullOrWhiteSpace(auction.AuctionSettlement.BuyNowGoodsHoldId))
+        {
+            auction.AuctionSettlement.BuyNowGoodsPendingAction = DepositPendingAction.Release;
         }
 
         if (offer is null)
@@ -1762,6 +2298,9 @@ public sealed class AuctionService : IAuctionService
             auction.NeedsAttention = false;
 
             // Hoàn phần cọc đã Capture về ví Buyer qua Wallet W5 (PendingAction = Refund, v0.4 mục 4.6).
+            if (settlement.IsBuyNow && !string.IsNullOrWhiteSpace(settlement.BuyNowGoodsHoldId))
+                settlement.BuyNowGoodsPendingAction = DepositPendingAction.Refund;
+
             var winnerDeposit = await _dbContext.AuctionDeposits
                 .FirstOrDefaultAsync(d => d.AuctionId == auctionId && d.BidderId == winnerId && !d.IsDeleted, cancellationToken);
             if (winnerDeposit is not null && (winnerDeposit.Status == DepositStatus.Captured || winnerDeposit.Status == DepositStatus.Authorized))
@@ -2015,6 +2554,8 @@ public sealed class AuctionService : IAuctionService
                 a.SellerId,
                 a.SnapshotProductTitle,
                 a.StartPriceAmount,
+                a.ReservePriceAmount,
+                a.BuyNowPriceAmount,
                 a.ScheduledStartAt,
                 a.CreatedAt,
                 Status = a.AuctionState!.Status,
@@ -2033,7 +2574,10 @@ public sealed class AuctionService : IAuctionService
                 r.Id, r.ProductId, r.SkuId, r.SellerId, r.SnapshotProductTitle,
                 r.SkuId is { } skuId && images.TryGetValue(skuId, out var imageUrl) ? imageUrl : null,
                 r.Status, r.StartPriceAmount, r.CurrentPriceAmount, r.BidCount,
-                r.ScheduledStartAt, r.ScheduledEndAt, r.CreatedAt))
+                r.ScheduledStartAt, r.ScheduledEndAt, r.CreatedAt,
+                r.BuyNowPriceAmount,
+                IsReserveMet: r.ReservePriceAmount is null || (r.CurrentPriceAmount.HasValue && r.CurrentPriceAmount.Value >= r.ReservePriceAmount.Value),
+                BuyNowAvailable: AuctionRules.IsBuyNowAvailable(r.Status, r.ReservePriceAmount, r.BuyNowPriceAmount, r.CurrentPriceAmount, r.BidCount)))
             .ToList();
 
         return new PagedData<AuctionSummaryDto>(items, PaginationMetadata.Create(safePage, safePageSize, totalCount));
@@ -2057,6 +2601,8 @@ public sealed class AuctionService : IAuctionService
                 a.SnapshotProductTitle,
                 a.StartPriceAmount,
                 a.BidStepAmount,
+                a.ReservePriceAmount,
+                a.BuyNowPriceAmount,
                 a.ScheduledStartAt,
                 a.OriginalEndAt,
                 a.MaxExtensionCount,
@@ -2084,13 +2630,22 @@ public sealed class AuctionService : IAuctionService
             .Select((image, index) => new AuctionImageDto(image.Url, IsPrimary: index == 0))
             .ToList();
 
+        var isReserveMet = row.ReservePriceAmount is null
+            || (row.CurrentPriceAmount.HasValue && row.CurrentPriceAmount.Value >= row.ReservePriceAmount.Value);
+        var buyNowAvailable = AuctionRules.IsBuyNowAvailable(
+            row.Status, row.ReservePriceAmount, row.BuyNowPriceAmount, row.CurrentPriceAmount, row.BidCount);
+
         return new AuctionDetailDto(
             row.Id, row.ProductId, row.SkuId, row.SellerId, row.SnapshotProductTitle ?? product?.Name,
             product?.Description, images.FirstOrDefault()?.Url, images, ParseSpecifications(product?.SpecificationsJson),
             row.Status, row.StartPriceAmount, row.BidStepAmount, row.CurrentPriceAmount, row.BidCount,
             row.ScheduledStartAt, row.OriginalEndAt, row.ScheduledEndAt, row.StartedAt, row.EndedAt,
             row.ExtensionCount, row.MaxExtensionCount, row.AntiSnipingExtensionMinutes,
-            row.RecreatedFromAuctionId, row.CreatedAt, row.RowVersion);
+            row.RecreatedFromAuctionId, row.CreatedAt, row.RowVersion,
+            row.BuyNowPriceAmount,
+            HasReservePrice: row.ReservePriceAmount.HasValue,
+            IsReserveMet: isReserveMet,
+            BuyNowAvailable: buyNowAvailable);
     }
 
     // ------------------------------------------------------------------ Commands
@@ -2110,10 +2665,12 @@ public sealed class AuctionService : IAuctionService
         AuctionRules.ValidateStartPrice(request.StartPriceAmount);
         if (request.BidStepAmount is not null)
             AuctionRules.ValidateBidStep(request.BidStepAmount);
+        AuctionRules.ValidateReserveAndBuyNowPrices(request.StartPriceAmount!.Value, request.ReservePriceAmount, request.BuyNowPriceAmount);
         AuctionRules.ValidateSchedule(request.ScheduledStartAt, request.ScheduledEndAt, now);
 
-        // 2. User service: the caller must be an approved seller with enough reputation.
+        // 2. User service & reserve restriction: the caller must be an approved seller with enough reputation.
         await EnsureSellerEligibleAsync(actor.UserId, cancellationToken);
+        await EnsureSellerCanSetReservePriceAsync(actor.UserId, request.ReservePriceAmount, now, cancellationToken);
 
         // 3. Catalog: the variant must be an active auction item of this seller. Catalog also tells which product it belongs to,
         //    then one open auction per product is checked.
@@ -2129,6 +2686,7 @@ public sealed class AuctionService : IAuctionService
         var created = NewAuction(
             actor.UserId, productId, skuId, title, recreatedFromAuctionId: null,
             request.StartPriceAmount!.Value, bidStep,
+            request.ReservePriceAmount, request.BuyNowPriceAmount,
             request.ScheduledStartAt!.Value, request.ScheduledEndAt!.Value, policy, now);
 
         _dbContext.Auctions.Add(created.Auction);
@@ -2155,7 +2713,8 @@ public sealed class AuctionService : IAuctionService
         return new AuctionCreatedResponse(
             a.Id, a.ProductId, a.SkuId, a.SnapshotProductTitle, AuctionStatus.Scheduled,
             a.StartPriceAmount, a.BidStepAmount, a.ScheduledStartAt, a.OriginalEndAt,
-            a.AntiSnipingExtensionMinutes, a.MaxExtensionCount, a.CreatedAt);
+            a.AntiSnipingExtensionMinutes, a.MaxExtensionCount, a.CreatedAt,
+            a.ReservePriceAmount, a.BuyNowPriceAmount);
     }
 
     /// <summary>
@@ -2168,7 +2727,8 @@ public sealed class AuctionService : IAuctionService
         var now = _clock.GetUtcNow();
 
         if (request.StartPriceAmount is null && request.BidStepAmount is null &&
-            request.ScheduledStartAt is null && request.ScheduledEndAt is null)
+            request.ScheduledStartAt is null && request.ScheduledEndAt is null &&
+            request.ReservePriceAmount is null && request.BuyNowPriceAmount is null)
             throw Invalid("VAL_NO_FIELDS_TO_UPDATE", "At least one field must be provided.");
 
         var auction = await LoadForWriteAsync(auctionId, cancellationToken);
@@ -2180,22 +2740,31 @@ public sealed class AuctionService : IAuctionService
 
         var startPrice = request.StartPriceAmount ?? auction.StartPriceAmount;
         var bidStep = request.BidStepAmount ?? auction.BidStepAmount;
+        var reservePrice = request.ReservePriceAmount ?? auction.ReservePriceAmount;
+        var buyNowPrice = request.BuyNowPriceAmount ?? auction.BuyNowPriceAmount;
         var start = request.ScheduledStartAt ?? auction.ScheduledStartAt;
         var end = request.ScheduledEndAt ?? state.ScheduledEndAt;
 
         // The same checks as when creating the auction.
         AuctionRules.ValidatePrices(startPrice, bidStep);
+        AuctionRules.ValidateReserveAndBuyNowPrices(startPrice, reservePrice, buyNowPrice);
+        if (request.ReservePriceAmount is not null)
+            await EnsureSellerCanSetReservePriceAsync(actor.UserId, request.ReservePriceAmount, now, cancellationToken);
         AuctionRules.ValidateSchedule(start, end, now);
 
         var oldValues = Snapshot(auction, state.Status);
         var changed = new List<string>();
         if (startPrice != auction.StartPriceAmount) changed.Add("startPriceAmount");
         if (bidStep != auction.BidStepAmount) changed.Add("bidStepAmount");
+        if (reservePrice != auction.ReservePriceAmount) changed.Add("reservePriceAmount");
+        if (buyNowPrice != auction.BuyNowPriceAmount) changed.Add("buyNowPriceAmount");
         if (start != auction.ScheduledStartAt) changed.Add("scheduledStartAt");
         if (end != state.ScheduledEndAt) changed.Add("scheduledEndAt");
 
         auction.StartPriceAmount = startPrice;
         auction.BidStepAmount = bidStep;
+        auction.ReservePriceAmount = reservePrice;
+        auction.BuyNowPriceAmount = buyNowPrice;
         auction.ScheduledStartAt = start;
         auction.OriginalEndAt = end;
         auction.UpdatedAt = now;
@@ -2214,7 +2783,8 @@ public sealed class AuctionService : IAuctionService
 
         return new AuctionUpdatedResponse(
             auction.Id, state.Status, auction.StartPriceAmount, auction.BidStepAmount,
-            auction.ScheduledStartAt, state.ScheduledEndAt, now);
+            auction.ScheduledStartAt, state.ScheduledEndAt, now,
+            auction.ReservePriceAmount, auction.BuyNowPriceAmount);
     }
 
     /// <summary>
@@ -3106,7 +3676,10 @@ public sealed class AuctionService : IAuctionService
                 "INVALID_RECREATE_SOURCE", "Only a failed auction can be recreated.", 422);
 
         await EnsureSellerEligibleAsync(actor.UserId, cancellationToken);
+        await EnsureSellerCanSetReservePriceAsync(actor.UserId, request.ReservePriceAmount, now, cancellationToken);
         await EnsureProductHasNoOpenAuctionAsync(source.ProductId, cancellationToken);
+
+        AuctionRules.ValidateReserveAndBuyNowPrices(request.StartPriceAmount!.Value, request.ReservePriceAmount, request.BuyNowPriceAmount);
 
         if (source.SkuId is not { } sourceSkuId)
             throw NotEligible("The auction has no SKU to check.");
@@ -3120,6 +3693,7 @@ public sealed class AuctionService : IAuctionService
         var created = NewAuction(
             actor.UserId, source.ProductId, source.SkuId, title ?? source.SnapshotProductTitle, source.Id,
             request.StartPriceAmount!.Value, bidStep,
+            request.ReservePriceAmount, request.BuyNowPriceAmount,
             request.ScheduledStartAt!.Value, request.ScheduledEndAt!.Value, policy, now);
 
         _dbContext.Auctions.Add(created.Auction);
@@ -3145,7 +3719,8 @@ public sealed class AuctionService : IAuctionService
         var a = created.Auction;
         return new AuctionRecreatedResponse(
             a.Id, source.Id, a.ProductId, a.SkuId, AuctionStatus.Scheduled,
-            a.StartPriceAmount, a.BidStepAmount, a.ScheduledStartAt, a.OriginalEndAt, a.CreatedAt);
+            a.StartPriceAmount, a.BidStepAmount, a.ScheduledStartAt, a.OriginalEndAt, a.CreatedAt,
+            a.ReservePriceAmount, a.BuyNowPriceAmount);
     }
 
     // ------------------------------------------------------------------ Checks with other services
@@ -3388,7 +3963,8 @@ public sealed class AuctionService : IAuctionService
     /// </summary>
     private static (AuctionEntity Auction, AuctionStatusHistory History) NewAuction(
         Guid sellerId, Guid productId, Guid? skuId, string? title, Guid? recreatedFromAuctionId,
-        decimal startPriceAmount, decimal bidStepAmount, DateTimeOffset start, DateTimeOffset end,
+        decimal startPriceAmount, decimal bidStepAmount, decimal? reservePriceAmount, decimal? buyNowPriceAmount,
+        DateTimeOffset start, DateTimeOffset end,
         AuctionPolicy policy, DateTimeOffset now)
     {
         var id = Guid.NewGuid();
@@ -3403,6 +3979,8 @@ public sealed class AuctionService : IAuctionService
             RecreatedFromAuctionId = recreatedFromAuctionId,
             StartPriceAmount = startPriceAmount,
             BidStepAmount = bidStepAmount,
+            ReservePriceAmount = reservePriceAmount,
+            BuyNowPriceAmount = buyNowPriceAmount,
             ScheduledStartAt = start,
             OriginalEndAt = end,
             AntiSnipingExtensionMinutes = policy.AntiSnipingExtensionMinutes,

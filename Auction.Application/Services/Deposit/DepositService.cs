@@ -1029,6 +1029,92 @@ public sealed class DepositService : IDepositService
         }
 
         await ReconcileOrphanedDepositsAsync(limit, cancellationToken);
+        await ProcessDueBuyNowGoodsHoldsAsync(limit, cancellationToken);
+    }
+
+    /// <summary>Captures or releases the separate goods hold created by Buy Now (BuyNowPrice - DepositAmount).</summary>
+    private async Task ProcessDueBuyNowGoodsHoldsAsync(int limit, CancellationToken cancellationToken)
+    {
+        var settlements = await _dbContext.AuctionSettlements
+            .Where(s => !s.IsDeleted
+                        && s.IsBuyNow
+                        && s.BuyNowGoodsHoldId != null
+                        && s.BuyNowGoodsPendingAction != DepositPendingAction.None)
+            .OrderBy(s => s.UpdatedAt)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
+        foreach (var settlement in settlements)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var now = _clock.GetUtcNow();
+
+            try
+            {
+                if (settlement.BuyNowGoodsPendingAction == DepositPendingAction.Release)
+                {
+                    await _wallet.ReleaseDepositHoldAsync(
+                        settlement.BuyNowGoodsHoldId!,
+                        "BUY_NOW_GOODS_RETURN",
+                        $"buynow-goods-release:{settlement.Id}",
+                        cancellationToken);
+                    settlement.BuyNowGoodsPendingAction = DepositPendingAction.None;
+                    settlement.UpdatedAt = now;
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                }
+                else if (settlement.BuyNowGoodsPendingAction == DepositPendingAction.Capture)
+                {
+                    if (settlement.OrderId is null)
+                        continue;
+
+                    var sellerId = await _dbContext.Auctions
+                        .AsNoTracking()
+                        .Where(a => a.Id == settlement.AuctionId)
+                        .Select(a => (Guid?)a.SellerId)
+                        .FirstOrDefaultAsync(cancellationToken);
+
+                    var amount = settlement.BuyNowGoodsAmount ?? 0m;
+                    var transfers = new[]
+                    {
+                        new HoldTransferInstruction(
+                            "SYSTEM_ESCROW", sellerId, amount,
+                            $"Buy Now goods payment for auction {settlement.AuctionId}, order {settlement.OrderId}.")
+                    };
+                    await _wallet.CaptureDepositHoldAsync(
+                        settlement.BuyNowGoodsHoldId!,
+                        new CaptureDepositHoldCommand("OrderPayment", amount, transfers, settlement.OrderId),
+                        $"buynow-goods-capture:{settlement.Id}",
+                        cancellationToken);
+
+                    settlement.BuyNowGoodsPendingAction = DepositPendingAction.None;
+                    settlement.UpdatedAt = now;
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                }
+                else if (settlement.BuyNowGoodsPendingAction == DepositPendingAction.Refund)
+                {
+                    if (settlement.OrderId is null)
+                        continue;
+
+                    await _wallet.RefundCapturedHoldAsync(
+                        settlement.BuyNowGoodsHoldId!,
+                        settlement.OrderId.Value,
+                        settlement.BuyNowGoodsAmount ?? 0m,
+                        "ORDER_CANCELLED_REFUND",
+                        $"buynow-goods-refund:{settlement.Id}",
+                        cancellationToken);
+
+                    settlement.BuyNowGoodsPendingAction = DepositPendingAction.None;
+                    settlement.UpdatedAt = now;
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                }
+            }
+            catch (DomainException ex) when (ex.StatusCode >= 500)
+            {
+                _logger.LogWarning(
+                    "Buy Now goods hold action {Action} for auction {AuctionId} failed ({ErrorCode}). Will retry.",
+                    settlement.BuyNowGoodsPendingAction, settlement.AuctionId, ex.ErrorCode);
+            }
+        }
     }
 
     /// <summary>How long an Authorized deposit on a closed auction is left alone, so a settlement that is still being processed is not raced.</summary>
