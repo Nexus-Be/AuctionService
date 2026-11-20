@@ -231,6 +231,11 @@ public sealed class WalletClient : IWalletClient
             {
                 Details = ExtractInsufficientBalanceDetails(payload)
             },
+            400 when code is "INSUFFICIENT_BALANCE" or "INSUFFICIENT_AVAILABLE_BALANCE" => new DomainException(
+                "INSUFFICIENT_AVAILABLE_BALANCE", "Insufficient available balance in wallet to hold the deposit.", 422)
+            {
+                Details = ExtractInsufficientBalanceDetails(payload)
+            },
             // Wallet answers 403 for a frozen wallet and 404 for a missing wallet. Both are business refusals for the payer, so they map to 422.
             403 or 422 when code == "WALLET_FROZEN" => new DomainException(
                 code, "The wallet is currently frozen.", 422),

@@ -995,11 +995,25 @@ public sealed class AuctionService : IAuctionService
 
         var fromStatus = state.Status;
         var paymentDeadline = now.Add(WinnerPaymentWindow);
+        var nextBidSeq = state.BidCount + 1;
+        var buyNowBid = new Bid
+        {
+            Id = Guid.NewGuid(),
+            AuctionId = auctionId,
+            BidSeq = nextBidSeq,
+            BidderId = actor.UserId,
+            Amount = buyNowPrice,
+            PlacedAt = now,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        _dbContext.Bids.Add(buyNowBid);
 
         state.Status = AuctionStatus.Ended;
         state.EndedAt = now;
         state.CurrentWinnerId = actor.UserId;
         state.CurrentPriceAmount = buyNowPrice;
+        state.BidCount = nextBidSeq;
         state.UpdatedAt = now;
         state.RowVersion += 1;
 
@@ -1017,7 +1031,7 @@ public sealed class AuctionService : IAuctionService
             _dbContext.AuctionResults.Add(result);
         }
         result.WinnerId = actor.UserId;
-        result.WinningBidId = null;
+        result.WinningBidId = buyNowBid.Id;
         result.FinalPriceAmount = buyNowPrice;
         result.DeterminedAt = now;
         result.UpdatedAt = now;
@@ -1036,7 +1050,7 @@ public sealed class AuctionService : IAuctionService
             _dbContext.AuctionSettlements.Add(settlement);
         }
         settlement.WinnerId = actor.UserId;
-        settlement.WinningBidId = null;
+        settlement.WinningBidId = buyNowBid.Id;
         settlement.Status = AuctionSettlementStatus.PendingPayment;
         settlement.PaymentDeadlineAt = paymentDeadline;
         settlement.IsBuyNow = true;
