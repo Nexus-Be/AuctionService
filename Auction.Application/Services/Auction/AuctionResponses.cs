@@ -15,7 +15,9 @@ public sealed record AuctionCreatedResponse(
     DateTimeOffset ScheduledEndAt,
     int AntiSnipingExtensionMinutes,
     int MaxExtensionCount,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    decimal? ReservePriceAmount = null,
+    decimal? BuyNowPriceAmount = null);
 
 public sealed record AuctionUpdatedResponse(
     Guid AuctionId,
@@ -24,7 +26,9 @@ public sealed record AuctionUpdatedResponse(
     decimal BidStepAmount,
     DateTimeOffset ScheduledStartAt,
     DateTimeOffset ScheduledEndAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    decimal? ReservePriceAmount = null,
+    decimal? BuyNowPriceAmount = null);
 
 public sealed record AuctionCancelledResponse(
     Guid AuctionId,
@@ -45,7 +49,36 @@ public sealed record AuctionRecreatedResponse(
     decimal BidStepAmount,
     DateTimeOffset ScheduledStartAt,
     DateTimeOffset ScheduledEndAt,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    decimal? ReservePriceAmount = null,
+    decimal? BuyNowPriceAmount = null);
+
+public sealed record BuyNowResponse(
+    Guid AuctionId,
+    Guid WinnerId,
+    decimal BuyNowPriceAmount,
+    decimal DepositAmountHeld,
+    decimal RemainingGoodsAmountHeld,
+    AuctionStatus Status,
+    DateTimeOffset EndedAt,
+    DateTimeOffset PaymentDeadlineAt,
+    long RowVersion);
+
+public sealed record ReserveApprovalResponse(
+    Guid AuctionId,
+    AuctionStatus AuctionStatus,
+    AuctionSettlementStatus SettlementStatus,
+    decimal? AcceptedPriceAmount,
+    DateTimeOffset? PaymentDeadlineAt,
+    int ConsecutiveDeclineCount,
+    DateTimeOffset? ReserveRestrictedUntil,
+    DateTimeOffset RespondedAt);
+
+public sealed record SellerReserveStatusResponse(
+    Guid SellerId,
+    int ConsecutiveDeclineCount,
+    bool IsReserveRestricted,
+    DateTimeOffset? ReserveRestrictedUntil);
 
 /// <summary>Phản hồi sau khi AuctionService xử lý kết quả thanh toán từ Commerce.</summary>
 public sealed record SettlementPaymentStatusResponse(

@@ -18,7 +18,10 @@ public sealed record AuctionSummaryDto(
     int BidCount,
     DateTimeOffset ScheduledStartAt,
     DateTimeOffset ScheduledEndAt,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    decimal? BuyNowPriceAmount = null,
+    bool IsReserveMet = true,
+    bool BuyNowAvailable = false);
 
 public sealed record SellerAuctionStatisticsDto(
     Guid SellerId,
@@ -54,7 +57,11 @@ public sealed record AuctionDetailDto(
     int AntiSnipingExtensionMinutes,
     Guid? RecreatedFromAuctionId,
     DateTimeOffset CreatedAt,
-    long RowVersion);
+    long RowVersion,
+    decimal? BuyNowPriceAmount = null,
+    bool HasReservePrice = false,
+    bool IsReserveMet = true,
+    bool BuyNowAvailable = false);
 
 public sealed record AuctionStatusHistoryDto(
     Guid HistoryId,
@@ -150,7 +157,8 @@ public sealed record AuctionCancelledMessage(
 public sealed record AuctionStatusChangedMessage(
     Guid AuctionId,
     string Status,
-    DateTimeOffset ChangedAt);
+    DateTimeOffset ChangedAt,
+    string? Reason = null);
 
 /// <summary>
 /// Một lời mời trở thành người thắng của bidder. IsExpired là true khi lời mời còn Pending nhưng đã quá ExpiresAt

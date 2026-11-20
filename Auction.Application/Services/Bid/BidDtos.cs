@@ -43,4 +43,6 @@ public sealed record BidPlacedMessage(
     DateTimeOffset ScheduledEndAt,
     int ExtensionCount,
     decimal? PreviousPriceAmount,
-    long RowVersion);
+    long RowVersion,
+    bool IsReserveMet = true,
+    bool BuyNowAvailable = false);

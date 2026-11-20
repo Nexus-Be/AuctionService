@@ -1,7 +1,7 @@
 # TÀI LIỆU PHÂN TÍCH NGHIỆP VỤ: GIÁ SÀN (RESERVE PRICE) & LUỒNG DUYỆT BÁN DƯỚI GIÁ SÀN
 
 > **Đối tượng đọc:** Product Owner / BA, Frontend (FE), Backend (BE), QA.  
-> **Mục tiêu tài liệu:** Làm rõ bản chất và sự khác biệt giữa **Giá sàn** và **Giá khởi điểm**, lý do lựa chọn phương án **"Kết thúc tự nhiên + Hỏi ý kiến Seller trong 24h"** thay vì hủy sớm hay dùng tài khoản nội bộ, cùng hướng dẫn triển khai chi tiết cho BE và FE.  
+> **Mục tiêu tài liệu:** Làm rõ bản chất và sự khác biệt giữa **Giá sàn** và **Giá khởi điểm**, lý do lựa chọn phương án **"Kết thúc tự nhiên + Hỏi ý kiến Seller trong 12h"** thay vì hủy sớm hay dùng tài khoản nội bộ, cùng hướng dẫn triển khai chi tiết cho BE và FE.  
 > **Tài liệu liên quan:** [01_AUCTION_END_TO_END_FLOW.md](./01_AUCTION_END_TO_END_FLOW.md) • [03_BUY_NOW_BUSINESS_ANALYSIS.md](./03_BUY_NOW_BUSINESS_ANALYSIS.md)
 
 ---
@@ -35,9 +35,10 @@ Nhiều người dễ nhầm hai khái niệm này, nhưng về mặt nghiệp v
     - Nếu phiên **KHÔNG cài Giá sàn riêng**: Nút Buy Now ẩn ngay khi **có lượt bid đầu tiên** (giống chuẩn eBay cho phiên không có giá sàn).
 
 ### 2.2. Ràng buộc quan hệ giữa 3 mức giá (Validation)
-Nếu Seller có nhập các thông số tương ứng, hệ thống bắt buộc kiểm tra:
+Seller tự nhập các mức giá, hệ thống chỉ kiểm tra quan hệ thứ tự:
 $$\text{StartPrice} \le \text{ReservePrice} < \text{BuyNowPrice}$$
-*(Trong đó khuyến nghị `BuyNowPrice` lớn hơn `ReservePrice` tối thiểu 1 bước giá để nút Mua ngay có ý nghĩa).*
+- Không áp khoảng cách tối thiểu hay bội số cho `ReservePrice` và `BuyNowPrice`.
+- **Hệ số giới hạn `ReservePrice` so với `StartPrice`:** *Đang chờ bàn lại* (xem Mục 5.2).
 
 ---
 
@@ -52,7 +53,13 @@ Trước khi chốt phương án, team đã cân nhắc 2 cách thường đư�
 | **Cách 1: Dùng `force-cancel` của Admin khi thấy sắp hết giờ mà chưa đạt sàn** | Chủ động hủy phiên trước khi hết giờ nếu giá còn thấp hơn sàn. | 1. **Giết chết lượt bid phút chót:** Thực tế 70–80% lượt bid quyết định diễn ra ở 1–5 phút cuối (kèm luật gia hạn 5 phút). Hủy sớm làm mất cơ hội đạt giá sàn.<br>2. **Sai ngữ nghĩa dữ liệu:** `Admin force-cancel` mang nghĩa phiên bị cưỡng chế hủy do hàng giả/vi phạm. Dùng cho thiếu giá gây hiểu nhầm nghiêm trọng.<br>3. **Rủi ro canh giờ:** Chạy sớm mất khách, chạy trễ 1 giây phiên đã tự chốt dưới giá sàn. |
 | **Cách 2: Dùng Account nội bộ ("quân xanh") vào bid bằng giá sàn** | Cho tài khoản nội bộ vào đặt giá đúng bằng `ReservePrice` nếu sắp hết giờ chưa đạt sàn. | 1. **Vi phạm tính minh bạch (Shill Bidding / Thổi giá):** Trên sàn TMĐT trực tuyến, việc hệ thống/chủ sàn tự dùng acc ảo vào đẩy giá bị coi là gian lận, làm mất niềm tin hoàn toàn.<br>2. **Xung đột nặng với code Ví & Cọc:** Acc nội bộ muốn bid phải khóa tiền cọc thật trong Ví Nexus; nếu tự thắng sẽ sinh đơn hàng, không trả tiền sẽ bị tịch thu cọc 70/30, trừ uy tín, tăng chuỗi vi phạm và lại mời nhầm Người về nhì (vốn đặt dưới sàn). Phải viết quá nhiều code ngoại lệ để xóa dấu vết. |
 
-### 3.2. Giải pháp được chọn: Kết thúc tự nhiên + Cho Seller quyết định trong 24h (`PendingSellerDecision`)
+### 3.2. Giải pháp được chọn: Kết thúc tự nhiên + Cho Seller quyết định trong 12h
+
+> **Chốt thời gian:** Seller có **12 giờ** để quyết định (không phải 24h), để Hạng 1 không bị giữ cọc quá lâu (tối đa 12h chờ Seller + 24h thanh toán).
+>
+> **Mô hình trạng thái (không thêm trạng thái phiên mới):** Phiên vẫn ở `Ended`, chỉ thêm giá trị **`AwaitingSellerApproval`** vào enum `AuctionSettlementStatus` (lưu vào cột `Status` của bảng `AuctionSettlements` đã có sẵn trong DB, giúp an toàn khi restart và chạy job quét 12h chính xác). Seller từ chối / quá hạn $\rightarrow$ phiên `Failed`, lý do `ReserveNotMet` ghi vào lịch sử trạng thái.
+>
+> *(Các mốc "24h" trong sơ đồ và Mục 4.3 dưới đây áp dụng cho thời gian Seller quyết định được hiểu là **12h**.)*
 
 Thay vì can thiệp thô bạo trước khi hết giờ, hệ thống để phiên chạy tự nhiên tới **đúng giây `00:00`** (vẫn áp dụng gia hạn chống bắn tỉa nếu có bid cuối giờ), sau đó phân nhánh minh bạch:
 
@@ -62,9 +69,9 @@ flowchart TD
     B -- "Không có ai bid" --> C["Thất bại (NoBids) -> Hoàn cọc nếu có & Mở khóa hàng"]
     B -- "Có người bid" --> D{"HighestBid >= ReservePrice?"}
     D -- "Có (Đạt giá sàn)" --> E["Luồng thắng chuẩn: Giữ cọc Hạng 1 & 2, hoàn cọc Hạng 3+, tạo đơn cho Hạng 1"]
-    D -- "Không (Chưa đạt giá sàn)" --> F["Giải tỏa cọc từ Hạng 2 trở đi NGAY LẬP TỨC.<br/>CHỈ giữ cọc Hạng 1.<br/>Chuyển trạng thái: Chờ Seller duyệt (24h)"]
-    F --> G{"Quyết định của Seller trong 24h?"}
-    G -- "Từ chối hoặc Quá 24h im lặng" --> H["Thất bại (ReserveNotMet)<br/>Hoàn 100% cọc Hạng 1 (Không phạt)<br/>Mở khóa hàng"]
+    D -- "Không (Chưa đạt giá sàn)" --> F["Giải tỏa cọc từ Hạng 2 trở đi NGAY LẬP TỨC.<br/>CHỈ giữ cọc Hạng 1.<br/>Phiên giữ Ended, Settlement = AwaitingSellerApproval (12h)"]
+    F --> G{"Quyết định của Seller trong 12h?"}
+    G -- "Từ chối hoặc Quá 12h im lặng" --> H["Thất bại (ReserveNotMet)<br/>Hoàn 100% cọc Hạng 1 (Không phạt)<br/>Mở khóa hàng"]
     G -- "Đồng ý bán dưới giá sàn" --> I["Tạo đơn cho Hạng 1 (Hạn trả tiền 24h)<br/>Theo mức giá Hạng 1 đã đặt"]
     I --> J{"Hạng 1 có thanh toán trong 24h?"}
     J -- "Có" --> K["Đi tiếp luồng giao hàng 24h bình thường"]
@@ -74,8 +81,10 @@ flowchart TD
 ### 3.3. Tại sao giải pháp này là tối ưu nhất?
 1. **Giữ trọn vẹn cơ hội phút chót:** Người mua được đấu giá sòng phẳng tới giây cuối cùng.
 2. **Tăng tỷ lệ chốt đơn thực tế:** Nhiều Seller đặt sàn `15 triệu`, nhưng khi thấy phiên chỉ đạt `14 triệu` vẫn sẵn sàng gật đầu bán luôn để khỏi mất công đăng lại.
-3. **Không mời Hạng 2 khi Hạng 1 bùng kèo dưới giá sàn:** Vì giá Hạng 1 vốn đã là mức dưới sàn mà Seller phải nhượng bộ mới bán, giá của Hạng 2 còn thấp hơn nữa nên không tự động mời Hạng 2 (tránh rắc rối hỏi ý kiến Seller nhiều lần). Do đó **cọc của Hạng 2 trở xuống được trả ngay từ phút `00:00`**.
-4. **Sạch sẽ về pháp lý & code:** Tuyệt đối không có tài khoản ảo, không phá vỡ logic Ví/Cọc hiện tại.
+3. **Hạng 1 bắt buộc phải mua khi Seller đồng ý:** Lượt đặt giá là **đề nghị mua có hiệu lực**, kể cả khi chưa đạt Giá sàn. Seller đã nhượng bộ bán dưới mức tối thiểu của mình mà Buyer còn bỏ thì bị **tịch thu cọc** như bỏ kèo thường. Quy tắc này phải ghi trong chính sách, và FE hiện câu nhắc khi Buyer đặt giá lúc phiên còn "Chưa đạt giá sàn":
+   > *"Mọi lượt đặt giá là đề nghị mua có hiệu lực. Nếu phiên kết thúc chưa đạt giá sàn và người bán đồng ý bán, người đặt giá cao nhất bắt buộc thanh toán trong 24h, nếu không sẽ bị tịch thu tiền cọc."*
+4. **Không mời Hạng 2 khi Hạng 1 bùng kèo dưới giá sàn:** Vì giá Hạng 1 vốn đã là mức dưới sàn mà Seller phải nhượng bộ mới bán, giá của Hạng 2 còn thấp hơn nữa nên không tự động mời Hạng 2 (tránh rắc rối hỏi ý kiến Seller nhiều lần). Do đó **cọc của Hạng 2 trở xuống được trả ngay từ phút `00:00`**.
+5. **Sạch sẽ về pháp lý & code:** Tuyệt đối không có tài khoản ảo, không phá vỡ logic Ví/Cọc hiện tại.
 
 ---
 
@@ -94,17 +103,17 @@ flowchart TD
   - Khi `isReserveMet == false`: Hiện badge màu cam/vàng nhẹ: **`Chưa đạt giá sàn`** (kèm tooltip nhỏ: *"Mức giá hiện tại chưa đạt kỳ vọng tối thiểu của người bán"*).
   - Khi `isReserveMet == true`: Đổi sang badge xanh lá: **`Đã đạt giá sàn`** (và đồng thời **ẩn nút Buy Now** nếu đang có).
 - **Khi phiên hết giờ mà `isReserveMet == false`:**
-  - Với **Hạng 1**: Hiển thị thông báo trạng thái *"Phiên đã kết thúc (Chưa đạt giá sàn) — Đang chờ Người bán xác nhận trong 24h. Tiền cọc của bạn vẫn đang được tạm giữ và sẽ hoàn lại 100% nếu Người bán từ chối."*
+  - Với **Hạng 1**: Hiển thị thông báo trạng thái *"Phiên đã kết thúc (Chưa đạt giá sàn) — Đang chờ Người bán xác nhận trong 12h. Tiền cọc của bạn vẫn đang được tạm giữ và sẽ hoàn lại 100% nếu Người bán từ chối."*
   - Với **Hạng 2 trở đi**: Hiển thị *"Phiên đã kết thúc (Chưa đạt giá sàn). Tiền cọc của bạn đã được mở khóa hoàn trả về Ví."*
 
-### 4.3. Màn hình Quản lý phiên của Seller (Khi rơi vào trạng thái `PendingSellerDecision`)
-- Hiển thị nổi bật đồng hồ đếm ngược **24 giờ** kèm thông tin:
+### 4.3. Màn hình Quản lý phiên của Seller (Khi Settlement ở trạng thái `AwaitingSellerApproval`)
+- Hiển thị nổi bật đồng hồ đếm ngược **12 giờ** kèm thông tin:
   - Giá sàn bạn đặt: `15.000.000 đ`
   - Giá cao nhất phiên đạt được: `14.000.000 đ`
 - Cung cấp 2 nút hành động rõ ràng:
   1. **[Đồng ý bán với giá 14.000.000 đ]** $\rightarrow$ Popup xác nhận tạo đơn hàng cho người thắng.
   2. **[Từ chối bán & Đóng phiên]** $\rightarrow$ Popup xác nhận hủy phiên, hoàn cọc cho người mua và mở khóa sản phẩm.
-- Nhắc nhẹ trên UI: *"Nếu bạn không phản hồi trong 24 giờ, phiên sẽ tự động hủy và hoàn cọc cho người mua."*
+- Nhắc nhẹ trên UI: *"Nếu bạn không phản hồi trong 12 giờ, phiên sẽ tự động hủy và hoàn cọc cho người mua."*
 
 ---
 
@@ -112,9 +121,11 @@ flowchart TD
 
 Việc cho phép Seller đặt Giá sàn là quyền hợp pháp để bảo vệ Seller khỏi bán lỗ, nên **không trừ uy tín ngay ở lần từ chối đầu tiên**. Tuy nhiên, để tránh tình trạng Seller lạm dụng (đặt Giá sàn trên trời để "dò giá" thị trường rồi phiên nào cũng hủy không bán, gây mất thời gian cho sàn và ức chế cho Buyer đã đóng cọc), cần áp dụng **3 lớp kiểm soát**:
 
-1. **Giới hạn quyền đặt Giá sàn nếu từ chối liên tiếp:**
-   - Nếu Seller từ chối bán dưới Giá sàn (hoặc để hết hạn 24h) **liên tiếp quá `N` lần** (ví dụ: 3 phiên liên tiếp hoặc tỷ lệ `ReserveNotMet` > 50% trong 30 ngày):
-   - Hệ thống **tạm khóa quyền đặt `ReservePrice` trong `X` ngày** (ví dụ 14 ngày) — trong thời gian này, Seller muốn mở phiên mới **bắt buộc phải đấu giá không giá sàn** (ai trả cao nhất từ `StartPrice` trở lên là bán luôn).
+1. **Giới hạn quyền đặt Giá sàn nếu từ chối liên tiếp (`N = 3` lần):**
+   - **Lần 1 từ chối:** Bình thường, chưa nhắc nhở.
+   - **Lần 2 từ chối liên tiếp:** Gửi **thông báo cảnh báo nhắc nhẹ** cho Seller: *"Bạn đã từ chối bán dưới giá sàn 2 lần liên tiếp. Nếu từ chối thêm 1 lần nữa, quyền đặt Giá sàn sẽ bị tạm khóa 14 ngày."*
+   - **Lần thứ 3 liên tiếp:** Hệ thống **tạm khóa quyền đặt `ReservePrice` trong `14 ngày`** (kèm thông báo lý do). Trong thời gian này, Seller vẫn được mở phiên bình thường nhưng **bắt buộc đấu giá không giá sàn** (ai trả cao nhất từ `StartPrice` trở lên là bán luôn).
+   - **Điều kiện xóa chuỗi (Reset về `0`):** Chỉ được reset về `0` khi Seller **bấm Đồng ý bán dưới giá sàn 1 lần** (hoặc khi hết hạn khóa 14 ngày) — **không** reset chỉ vì bán thành công một phiên thông thường khác.
 2. **Chặn biên độ chênh lệch quá vô lý khi tạo phiên:**
    - Tránh trường hợp Seller đặt `StartPrice = 100.000 đ` nhưng đặt `ReservePrice = 100.000.000 đ` (gây hiểu nhầm câu kéo). Nên giới hạn `ReservePrice` không vượt quá một hệ số hợp lý so với `StartPrice` (hoặc so với giá tham khảo sản phẩm).
 3. **Minh bạch tỷ lệ thành công của Seller (`SuccessRate`) cho Buyer:**

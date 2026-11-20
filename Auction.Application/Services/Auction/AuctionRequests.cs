@@ -13,13 +13,17 @@ public sealed record CreateAuctionRequest(
     decimal? StartPriceAmount,
     decimal? BidStepAmount,
     DateTimeOffset? ScheduledStartAt,
-    DateTimeOffset? ScheduledEndAt);
+    DateTimeOffset? ScheduledEndAt,
+    decimal? ReservePriceAmount = null,
+    decimal? BuyNowPriceAmount = null);
 
 public sealed record UpdateAuctionRequest(
     decimal? StartPriceAmount,
     decimal? BidStepAmount,
     DateTimeOffset? ScheduledStartAt,
-    DateTimeOffset? ScheduledEndAt);
+    DateTimeOffset? ScheduledEndAt,
+    decimal? ReservePriceAmount = null,
+    decimal? BuyNowPriceAmount = null);
 
 public sealed record CancelAuctionRequest(string? Reason);
 
@@ -30,7 +34,11 @@ public sealed record RecreateAuctionRequest(
     decimal? StartPriceAmount,
     decimal? BidStepAmount,
     DateTimeOffset? ScheduledStartAt,
-    DateTimeOffset? ScheduledEndAt);
+    DateTimeOffset? ScheduledEndAt,
+    decimal? ReservePriceAmount = null,
+    decimal? BuyNowPriceAmount = null);
+
+public sealed record RejectBelowReserveRequest(string? Reason = null);
 
 /// <summary>Trạng thái kết quả thanh toán do Commerce gửi về AuctionService.</summary>
 public enum SettlementPaymentStatus

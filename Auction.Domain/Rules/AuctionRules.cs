@@ -21,6 +21,15 @@ public static class AuctionRules
     /// <summary>How long the next bidder has to answer a winner offer (business rule: 24 hours).</summary>
     public const int WinnerOfferWindowHours = 24;
 
+    /// <summary>How long the seller has to approve or decline a below-reserve winning bid (business rule: 12 hours).</summary>
+    public const int SellerReserveApprovalWindowHours = 12;
+
+    /// <summary>Consecutive below-reserve declines before ReservePrice is temporarily restricted.</summary>
+    public const int MaxConsecutiveReserveDeclines = 3;
+
+    /// <summary>Duration of ReservePrice restriction after hitting the consecutive decline limit.</summary>
+    public const int ReserveRestrictionDays = 14;
+
     /// <summary>Both prices are required. Input problems return HTTP 400 with a VAL_ code.</summary>
     public static void ValidatePrices(decimal? startPriceAmount, decimal? bidStepAmount)
     {
@@ -77,6 +86,50 @@ public static class AuctionRules
                 "Bid step is required because the start price is too small to calculate a default bid step.");
 
         return step;
+    }
+
+    /// <summary>
+    /// Validates optional ReservePrice and BuyNowPrice: StartPrice &lt;= ReservePrice &lt; BuyNowPrice.
+    /// Sellers choose exact values freely without step or multiple constraints.
+    /// </summary>
+    public static void ValidateReserveAndBuyNowPrices(
+        decimal startPriceAmount, decimal? reservePriceAmount, decimal? buyNowPriceAmount)
+    {
+        if (reservePriceAmount is { } reserve)
+        {
+            if (reserve < 0m || HasMoreThanTwoDecimals(reserve))
+                throw Invalid("VAL_INVALID_PRICE", "Reserve price must be zero or greater and have at most two decimal places.");
+            if (reserve < startPriceAmount)
+                throw new BusinessRuleValidationException(
+                    "INVALID_PRICE_RELATION", "Reserve price must be greater than or equal to the start price.", 422);
+        }
+
+        if (buyNowPriceAmount is { } buyNow)
+        {
+            if (buyNow <= 0m || HasMoreThanTwoDecimals(buyNow))
+                throw Invalid("VAL_INVALID_PRICE", "Buy now price must be greater than zero and have at most two decimal places.");
+
+            var floor = reservePriceAmount ?? startPriceAmount;
+            if (buyNow <= floor)
+            {
+                var floorLabel = reservePriceAmount.HasValue ? "reserve price" : "start price";
+                throw new BusinessRuleValidationException(
+                    "INVALID_PRICE_RELATION", $"Buy now price must be greater than the {floorLabel}.", 422);
+            }
+        }
+    }
+
+    /// <summary>Returns true when the Buy Now button is currently open for a running auction.</summary>
+    public static bool IsBuyNowAvailable(
+        AuctionStatus status, decimal? reservePriceAmount, decimal? buyNowPriceAmount, decimal? currentPriceAmount, int bidCount)
+    {
+        if (status != AuctionStatus.Running || buyNowPriceAmount is null)
+            return false;
+
+        if (reservePriceAmount is { } reserve)
+            return currentPriceAmount is null || currentPriceAmount.Value < reserve;
+
+        return bidCount == 0;
     }
 
     /// <summary>

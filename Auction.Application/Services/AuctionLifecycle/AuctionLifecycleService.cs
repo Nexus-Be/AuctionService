@@ -13,6 +13,7 @@ using global::Auction.Application.Services.Deposit;
 using global::Auction.Domain.Entities;
 using global::Auction.Domain.Enums;
 using global::Auction.Domain.Exceptions;
+using global::Auction.Domain.Rules;
 
 public sealed class AuctionLifecycleService : IAuctionLifecycleService
 {
@@ -180,6 +181,7 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
         string reason;
         object newValues;
         AuctionWinnerNotification? winnerNotice = null;
+        bool isBelowReserve = false;
 
         if (winningBid is null)
         {
@@ -199,13 +201,21 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
         }
         else
         {
+            isBelowReserve = auction.ReservePriceAmount is { } reserve && winningBid.Amount < reserve;
+            if (isBelowReserve)
+                runnerUpBidderId = null; // Below reserve: release Hạng 2+ immediately, hold only Hạng 1 during 12h seller approval.
+
             toStatus = AuctionStatus.Ended;
-            reason = "Auction time expired.";
+            reason = isBelowReserve ? "Auction ended below reserve price; awaiting seller approval." : "Auction time expired.";
             state.Status = toStatus;
             state.CurrentWinnerId = winningBid.BidderId;
             state.CurrentPriceAmount = winningBid.Amount;
 
-            var paymentDeadline = now.Add(PaymentWindow);
+            var paymentDeadline = isBelowReserve ? (DateTimeOffset?)null : now.Add(PaymentWindow);
+            var sellerApprovalDeadline = isBelowReserve
+                ? now.AddHours(AuctionRules.SellerReserveApprovalWindowHours)
+                : (DateTimeOffset?)null;
+
             newValues = new
             {
                 status = toStatus.ToString(),
@@ -213,7 +223,9 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
                 winnerId = winningBid.BidderId,
                 winningBidId = winningBid.BidId,
                 finalPriceAmount = winningBid.Amount,
-                paymentDeadlineAt = paymentDeadline
+                isBelowReserve,
+                paymentDeadlineAt = paymentDeadline,
+                sellerApprovalDeadlineAt = sellerApprovalDeadline
             };
 
             // Thêm vào DbSet tường minh: entity mới đã có sẵn Id (Guid) nên nếu chỉ gán qua navigation,
@@ -252,14 +264,21 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             }
             settlement.WinnerId = winningBid.BidderId;
             settlement.WinningBidId = winningBid.BidId;
-            settlement.Status = AuctionSettlementStatus.PendingPayment;
+            settlement.IsBelowReserve = isBelowReserve;
+            settlement.Status = isBelowReserve
+                ? AuctionSettlementStatus.AwaitingSellerApproval
+                : AuctionSettlementStatus.PendingPayment;
             settlement.PaymentDeadlineAt = paymentDeadline;
+            settlement.SellerApprovalDeadlineAt = sellerApprovalDeadline;
             settlement.UpdatedAt = now;
 
-            // Gửi thông báo cho người thắng sau khi kết quả đã được lưu (xem bên dưới).
-            winnerNotice = new AuctionWinnerNotification(
-                auctionId, auction.SnapshotProductTitle, result.Id, winningBid.BidId, winningBid.BidderId,
-                auction.SellerId, winningBid.Amount, now, paymentDeadline);
+            if (!isBelowReserve)
+            {
+                // Gửi thông báo cho người thắng sau khi kết quả đã được lưu (xem bên dưới).
+                winnerNotice = new AuctionWinnerNotification(
+                    auctionId, auction.SnapshotProductTitle, result.Id, winningBid.BidId, winningBid.BidderId,
+                    auction.SellerId, winningBid.Amount, now, paymentDeadline!.Value);
+            }
         }
 
         _dbContext.AuctionStatusHistories.Add(new AuctionStatusHistory
@@ -312,7 +331,7 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
         {
             _notifications.NotifyAuctionWinner(winnerNotice);
         }
-        else
+        else if (winningBid is null)
         {
             _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
                 auctionId, auction.SellerId, auction.SnapshotProductTitle,
@@ -326,14 +345,14 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             await _deposits.ReleasePendingDepositsForAuctionAsync(auctionId, cancellationToken);
 
         await _notifier.AuctionStatusChangedAsync(
-            auctionId, new AuctionStatusChangedMessage(auctionId, toStatus.ToString(), now), CancellationToken.None);
+            auctionId, new AuctionStatusChangedMessage(auctionId, toStatus.ToString(), now, isBelowReserve ? "AwaitingSellerApproval" : null), CancellationToken.None);
 
-        // Đã lưu: đẩy settlement sang Commerce nếu có người thắng, hoặc mở khoá sản phẩm ở Catalog nếu không có bid hợp lệ.
+        // Đã lưu: đẩy settlement sang Commerce nếu đạt giá sàn, hoặc mở khoá sản phẩm ở Catalog nếu không có bid hợp lệ.
         if (winnerNotice is not null)
         {
             _commerceSync.PushSettlement(auctionId);
         }
-        else
+        else if (winningBid is null)
         {
             _catalogSync.UnlockProduct(auction.ProductId, auctionId);
         }
@@ -481,6 +500,7 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
     public async Task ProcessDueBackgroundTasksAsync(int limit, CancellationToken cancellationToken = default)
     {
         await _deposits.ProcessDueDepositRetriesAsync(limit, cancellationToken);
+        await ExpireDueSellerApprovalsAsync(limit, cancellationToken);
 
         var now = _clock.GetUtcNow();
 
@@ -717,6 +737,108 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             if (unsavedOutbox.Count > 0)
                 _dbContext.NotificationOutbox.RemoveRange(unsavedOutbox);
             return false;
+        }
+    }
+
+    /// <summary>Hết hạn các phiên đang AwaitingSellerApproval quá 12 giờ: chuyển Failed (ReserveNotMet), hoàn cọc Hạng 1 và tính 1 lần từ chối cho Seller.</summary>
+    private async Task ExpireDueSellerApprovalsAsync(int limit, CancellationToken cancellationToken)
+    {
+        var now = _clock.GetUtcNow();
+        var dueSettlements = await _dbContext.AuctionSettlements
+            .Where(s => !s.IsDeleted
+                        && s.Status == AuctionSettlementStatus.AwaitingSellerApproval
+                        && s.SellerApprovalDeadlineAt != null
+                        && s.SellerApprovalDeadlineAt <= now)
+            .OrderBy(s => s.SellerApprovalDeadlineAt)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
+        foreach (var settlement in dueSettlements)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var auction = await _dbContext.Auctions
+                .Include(a => a.AuctionState)
+                .FirstOrDefaultAsync(a => a.Id == settlement.AuctionId && !a.IsDeleted, cancellationToken);
+            if (auction?.AuctionState is null || auction.AuctionState.Status != AuctionStatus.Ended)
+                continue;
+
+            var state = auction.AuctionState;
+            settlement.Status = AuctionSettlementStatus.Expired;
+            settlement.UpdatedAt = now;
+
+            state.Status = AuctionStatus.Failed;
+            state.UpdatedAt = now;
+            state.RowVersion += 1;
+
+            auction.StockReleaseState = BackgroundSyncState.Pending;
+            auction.NextRetryAt = now;
+            auction.NeedsAttention = false;
+            auction.UpdatedAt = now;
+
+            var openAuction = await _dbContext.ProductOpenAuctions
+                .FirstOrDefaultAsync(p => p.AuctionId == auction.Id, cancellationToken);
+            if (openAuction is not null)
+                _dbContext.ProductOpenAuctions.Remove(openAuction);
+
+            var depositsToRelease = await _dbContext.AuctionDeposits
+                .Where(d => d.AuctionId == auction.Id && !d.IsDeleted &&
+                            (d.Status == DepositStatus.Authorized || d.Status == DepositStatus.Pending))
+                .ToListAsync(cancellationToken);
+            foreach (var deposit in depositsToRelease)
+            {
+                deposit.Status = DepositStatus.Released;
+                deposit.ReleasePending = true;
+                deposit.PendingAction = DepositPendingAction.Release;
+                deposit.ReleaseReason = "RESERVE_NOT_MET";
+                deposit.NextRetryAt = now;
+                deposit.NeedsAttention = false;
+                deposit.UpdatedAt = now;
+                deposit.RowVersion += 1;
+            }
+
+            var penalty = await _dbContext.SellerReservePenalties
+                .FirstOrDefaultAsync(p => p.SellerId == auction.SellerId && !p.IsDeleted, cancellationToken);
+            if (penalty is null)
+            {
+                penalty = new SellerReservePenalty
+                {
+                    Id = Guid.NewGuid(),
+                    SellerId = auction.SellerId,
+                    CreatedAt = now,
+                    UpdatedAt = now
+                };
+                _dbContext.SellerReservePenalties.Add(penalty);
+            }
+            penalty.ConsecutiveDeclineCount += 1;
+            if (penalty.ConsecutiveDeclineCount >= AuctionRules.MaxConsecutiveReserveDeclines)
+                penalty.ReserveRestrictedUntil = now.AddDays(AuctionRules.ReserveRestrictionDays);
+            penalty.UpdatedAt = now;
+
+            _dbContext.AuctionStatusHistories.Add(new AuctionStatusHistory
+            {
+                Id = Guid.NewGuid(),
+                AuctionId = auction.Id,
+                FromStatus = AuctionStatus.Ended,
+                ToStatus = AuctionStatus.Failed,
+                Reason = "ReserveNotMet: Seller did not approve the below-reserve bid within 12 hours.",
+                ChangedAt = now,
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+
+            _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+                auction.Id, auction.SellerId, auction.SnapshotProductTitle,
+                "ReserveNotMet: Seller approval timed out after 12 hours.", now, null));
+
+            if (await TrySaveAsync(cancellationToken))
+            {
+                if (depositsToRelease.Count > 0)
+                    await _deposits.ReleasePendingDepositsForAuctionAsync(auction.Id, cancellationToken);
+                _catalogSync.UnlockProduct(auction.ProductId, auction.Id);
+                await _notifier.AuctionStatusChangedAsync(
+                    auction.Id, new AuctionStatusChangedMessage(auction.Id, AuctionStatus.Failed.ToString(), now, "ReserveNotMet"), CancellationToken.None);
+            }
         }
     }
 }
