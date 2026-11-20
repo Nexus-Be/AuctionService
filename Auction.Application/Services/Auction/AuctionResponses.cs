@@ -149,3 +149,20 @@ public sealed record DismissAuctionReportsResponse(
     int DismissedCount,
     string Note,
     DateTimeOffset ReviewedAt);
+
+public sealed record AdminAuctionScheduleUpdatedResponse(
+    Guid AuctionId,
+    AuctionStatus Status,
+    DateTimeOffset ScheduledStartAt,
+    DateTimeOffset OriginalEndAt,
+    DateTimeOffset ScheduledEndAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record AdminSettlementDeadlinesUpdatedResponse(
+    Guid AuctionId,
+    AuctionSettlementStatus? SettlementStatus,
+    DateTimeOffset? SellerApprovalDeadlineAt,
+    DateTimeOffset? PaymentDeadlineAt,
+    Guid? PendingWinnerOfferId,
+    DateTimeOffset? WinnerOfferExpiresAt,
+    DateTimeOffset UpdatedAt);
