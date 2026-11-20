@@ -141,4 +141,12 @@ public interface IAuctionService
     /// <summary>Seller xem trạng thái giới hạn quyền đặt Giá sàn của mình.</summary>
     Task<SellerReserveStatusResponse> GetSellerReserveStatusAsync(
         Guid sellerId, CancellationToken cancellationToken = default);
+
+    /// <summary>Admin/Staff cập nhật thời gian bắt đầu/kết thúc phiên đấu giá (tua nhanh để test gia hạn hoặc chốt phiên).</summary>
+    Task<AdminAuctionScheduleUpdatedResponse> AdminUpdateScheduleAsync(
+        ActorContext actor, Guid auctionId, AdminUpdateAuctionScheduleRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>Admin/Staff cập nhật các mốc hạn chót sau phiên (duyệt giá sàn 12h, thanh toán 24h, second-chance offer) để test hết hạn.</summary>
+    Task<AdminSettlementDeadlinesUpdatedResponse> AdminUpdateSettlementDeadlinesAsync(
+        ActorContext actor, Guid auctionId, AdminUpdateSettlementDeadlinesRequest request, CancellationToken cancellationToken = default);
 }

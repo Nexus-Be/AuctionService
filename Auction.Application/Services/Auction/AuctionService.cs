@@ -4386,6 +4386,178 @@ public sealed class AuctionService : IAuctionService
             DeterminedAt = a.AuctionResult.DeterminedAt
         });
 
+    public async Task<AdminAuctionScheduleUpdatedResponse> AdminUpdateScheduleAsync(
+        ActorContext actor,
+        Guid auctionId,
+        AdminUpdateAuctionScheduleRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request.RemainingSeconds is null
+            && request.ScheduledStartAt is null
+            && request.ScheduledEndAt is null)
+        {
+            throw Invalid("VAL_INVALID_INPUT", "At least one schedule field must be provided.");
+        }
+
+        if (request.RemainingSeconds is < 0)
+            throw Invalid("VAL_INVALID_INPUT", "RemainingSeconds must be zero or a positive number.");
+
+        var auction = await _dbContext.Auctions
+            .Include(a => a.AuctionState)
+            .FirstOrDefaultAsync(a => a.Id == auctionId && !a.IsDeleted, cancellationToken)
+            ?? throw new DomainException("AUCTION_NOT_FOUND", "Auction not found.", 404);
+
+        var state = auction.AuctionState
+            ?? throw new DomainException("AUCTION_NOT_FOUND", "Auction state not found.", 404);
+
+        if (state.Status is not (AuctionStatus.Draft or AuctionStatus.Scheduled or AuctionStatus.Running))
+        {
+            throw new DomainException(
+                "INVALID_AUCTION_STATUS",
+                "Only draft, scheduled, or running auctions can have their schedule updated.",
+                409);
+        }
+
+        if (request.ScheduledStartAt.HasValue && state.Status == AuctionStatus.Running)
+        {
+            throw new DomainException(
+                "INVALID_AUCTION_STATUS",
+                "Cannot modify start time of a running auction.",
+                409);
+        }
+
+        var now = DateTimeOffset.UtcNow;
+
+        if (request.ScheduledStartAt.HasValue)
+            auction.ScheduledStartAt = request.ScheduledStartAt.Value;
+
+        var newEndAt = state.ScheduledEndAt;
+        if (request.RemainingSeconds.HasValue)
+        {
+            var baseTime = state.Status == AuctionStatus.Running || auction.ScheduledStartAt <= now
+                ? now
+                : auction.ScheduledStartAt;
+            newEndAt = baseTime.AddSeconds(request.RemainingSeconds.Value);
+        }
+        else if (request.ScheduledEndAt.HasValue)
+        {
+            newEndAt = request.ScheduledEndAt.Value;
+        }
+
+        if (newEndAt <= auction.ScheduledStartAt && !(state.Status == AuctionStatus.Running && request.RemainingSeconds == 0))
+            throw Invalid("VAL_INVALID_INPUT", "Scheduled end time must be after scheduled start time.");
+
+        state.ScheduledEndAt = newEndAt;
+        if (state.Status is AuctionStatus.Draft or AuctionStatus.Scheduled)
+            auction.OriginalEndAt = newEndAt;
+
+        state.RowVersion += 1;
+        state.UpdatedAt = now;
+        auction.UpdatedAt = now;
+
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return new AdminAuctionScheduleUpdatedResponse(
+            auction.Id,
+            state.Status,
+            auction.ScheduledStartAt,
+            auction.OriginalEndAt,
+            state.ScheduledEndAt,
+            now);
+    }
+
+    public async Task<AdminSettlementDeadlinesUpdatedResponse> AdminUpdateSettlementDeadlinesAsync(
+        ActorContext actor,
+        Guid auctionId,
+        AdminUpdateSettlementDeadlinesRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var hasSellerApprovalInput = request.SellerApprovalRemainingSeconds.HasValue || request.SellerApprovalDeadlineAt.HasValue;
+        var hasPaymentInput = request.PaymentRemainingSeconds.HasValue || request.PaymentDeadlineAt.HasValue;
+        var hasOfferInput = request.WinnerOfferRemainingSeconds.HasValue || request.WinnerOfferExpiresAt.HasValue;
+
+        if (!hasSellerApprovalInput && !hasPaymentInput && !hasOfferInput)
+            throw Invalid("VAL_INVALID_INPUT", "At least one deadline field must be provided.");
+
+        if (request.SellerApprovalRemainingSeconds is < 0
+            || request.PaymentRemainingSeconds is < 0
+            || request.WinnerOfferRemainingSeconds is < 0)
+        {
+            throw Invalid("VAL_INVALID_INPUT", "Remaining seconds must be zero or a positive number.");
+        }
+
+        var auction = await _dbContext.Auctions
+            .Include(a => a.AuctionSettlement)
+            .Include(a => a.WinnerOffers)
+            .FirstOrDefaultAsync(a => a.Id == auctionId && !a.IsDeleted, cancellationToken)
+            ?? throw new DomainException("AUCTION_NOT_FOUND", "Auction not found.", 404);
+
+        var now = DateTimeOffset.UtcNow;
+        var settlement = auction.AuctionSettlement;
+
+        if (hasSellerApprovalInput)
+        {
+            if (settlement is null || settlement.Status != AuctionSettlementStatus.AwaitingSellerApproval)
+            {
+                throw new DomainException(
+                    "INVALID_SETTLEMENT_STATUS",
+                    "Auction settlement is not awaiting seller approval.",
+                    409);
+            }
+
+            settlement.SellerApprovalDeadlineAt = request.SellerApprovalRemainingSeconds.HasValue
+                ? now.AddSeconds(request.SellerApprovalRemainingSeconds.Value)
+                : request.SellerApprovalDeadlineAt!.Value;
+            settlement.UpdatedAt = now;
+        }
+
+        if (hasPaymentInput)
+        {
+            if (settlement is null || settlement.Status != AuctionSettlementStatus.PendingPayment)
+            {
+                throw new DomainException(
+                    "INVALID_SETTLEMENT_STATUS",
+                    "Auction settlement is not pending payment.",
+                    409);
+            }
+
+            settlement.PaymentDeadlineAt = request.PaymentRemainingSeconds.HasValue
+                ? now.AddSeconds(request.PaymentRemainingSeconds.Value)
+                : request.PaymentDeadlineAt!.Value;
+            settlement.UpdatedAt = now;
+        }
+
+        var pendingOffer = auction.WinnerOffers
+            .FirstOrDefault(o => !o.IsDeleted && o.Status == AuctionWinnerOfferStatus.Pending);
+
+        if (hasOfferInput)
+        {
+            if (pendingOffer is null)
+            {
+                throw new DomainException(
+                    "WINNER_OFFER_NOT_FOUND",
+                    "No pending winner offer found for this auction.",
+                    409);
+            }
+
+            pendingOffer.ExpiresAt = request.WinnerOfferRemainingSeconds.HasValue
+                ? now.AddSeconds(request.WinnerOfferRemainingSeconds.Value)
+                : request.WinnerOfferExpiresAt!.Value;
+            pendingOffer.UpdatedAt = now;
+        }
+
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return new AdminSettlementDeadlinesUpdatedResponse(
+            auction.Id,
+            settlement?.Status,
+            settlement?.SellerApprovalDeadlineAt,
+            settlement?.PaymentDeadlineAt,
+            pendingOffer?.Id,
+            pendingOffer?.ExpiresAt,
+            now);
+    }
+
     /// <summary>Đổi một dòng dữ liệu phẳng thành AuctionSettlementDto. Tên sản phẩm trống thì trả chuỗi rỗng.</summary>
     private static AuctionSettlementDto ToSettlementDto(SettlementRow r) => new(
         r.AuctionId, r.ProductId, r.SkuId, r.SellerId, r.Title ?? string.Empty, r.WinnerId, r.WinningBidId,
