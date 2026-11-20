@@ -71,6 +71,23 @@ public sealed class AuctionService : IAuctionService
         Guid sellerId, int page = 1, int pageSize = 20, string? status = null, CancellationToken cancellationToken = default)
         => ListAuctionsAsync(page, pageSize, new AuctionListFilter(Status: status, SellerId: sellerId), cancellationToken);
 
+    /// <summary>Giá khởi điểm, giá sàn và giá mua ngay của chính phiên của seller. Chỉ seller sở hữu được xem (người khác nhận 403 FORBIDDEN).</summary>
+    public async Task<SellerAuctionPricingDto> GetSellerAuctionPricingAsync(
+        Guid sellerId, Guid auctionId, CancellationToken cancellationToken = default)
+    {
+        var row = await _dbContext.Auctions
+            .AsNoTracking()
+            .Where(a => a.Id == auctionId && !a.IsDeleted)
+            .Select(a => new { a.Id, a.SellerId, a.StartPriceAmount, a.ReservePriceAmount, a.BuyNowPriceAmount })
+            .FirstOrDefaultAsync(cancellationToken)
+            ?? throw NotFound(auctionId);
+
+        if (row.SellerId != sellerId)
+            throw new DomainException("FORBIDDEN", "Only the seller of the auction can view its reserve price.", 403);
+
+        return new SellerAuctionPricingDto(row.Id, row.StartPriceAmount, row.ReservePriceAmount, row.BuyNowPriceAmount);
+    }
+
     /// <summary>Lấy danh sách phiên đấu giá mà caller đã tham gia (gom theo từng phiên, tránh lặp theo từng lượt bid).</summary>
     public async Task<PagedData<MyParticipatedAuctionDto>> ListMyAuctionsAsync(
         Guid userId, int page = 1, int pageSize = 20, string? participationState = null, string? status = null,
@@ -1799,7 +1816,9 @@ public sealed class AuctionService : IAuctionService
                 settlementStatusText,
                 winnerDepositAmount,
                 remaining,
-                settlement.PaymentDeadlineAt);
+                settlement.PaymentDeadlineAt,
+                AuctionRules.ShowsSellerApproval(settlement.Status, isSeller, isPrivileged),
+                AuctionRules.ShowsSellerApproval(settlement.Status, isSeller, isPrivileged) ? settlement.SellerApprovalDeadlineAt : null);
         }
 
         AuctionResultMyDepositDto? myDepositDto = null;

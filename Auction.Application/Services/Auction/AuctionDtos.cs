@@ -80,7 +80,16 @@ public sealed record AuctionResultSettlementDto(
     string SettlementStatus,
     decimal DepositAmount,
     decimal RemainingAmount,
-    DateTimeOffset? PaymentDeadlineAt);
+    DateTimeOffset? PaymentDeadlineAt,
+    bool AwaitingSellerApproval = false,
+    DateTimeOffset? SellerApprovalDeadlineAt = null);
+
+/// <summary>The prices of an auction as its own seller set them. The reserve price is secret from everyone else, so this is a separate view.</summary>
+public sealed record SellerAuctionPricingDto(
+    Guid AuctionId,
+    decimal StartPriceAmount,
+    decimal? ReservePriceAmount,
+    decimal? BuyNowPriceAmount);
 
 public sealed record AuctionResultMyDepositDto(
     DepositStatus Status,

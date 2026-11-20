@@ -64,6 +64,17 @@ public class AuctionRulesTests
         AuctionRules.IsBuyNowAvailable(status, reserve, 300_000m, current, bids).Should().Be(expected);
     }
 
+    [Theory]
+    [InlineData(AuctionSettlementStatus.AwaitingSellerApproval, true, false, true)]
+    [InlineData(AuctionSettlementStatus.AwaitingSellerApproval, false, true, true)]
+    [InlineData(AuctionSettlementStatus.AwaitingSellerApproval, false, false, false)]   // the winner must not learn the bid was under the reserve
+    [InlineData(AuctionSettlementStatus.PendingPayment, true, true, false)]
+    [InlineData(AuctionSettlementStatus.Paid, true, false, false)]
+    public void SellerApproval_IsShownOnlyToTheSellerAndStaff(AuctionSettlementStatus status, bool isSeller, bool isPrivileged, bool expected)
+    {
+        AuctionRules.ShowsSellerApproval(status, isSeller, isPrivileged).Should().Be(expected);
+    }
+
     [Fact]
     public void Schedule_RejectsPastStart_ShortAndLongDurations()
     {

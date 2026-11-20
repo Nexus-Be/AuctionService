@@ -177,6 +177,17 @@ public class AuctionsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Seller reads the start, reserve and Buy Now prices of one of their own auctions. The reserve price is never public.</summary>
+    [HttpGet("~/api/v1/seller/auctions/{id:guid}/pricing")]
+    [ProducesResponseType(typeof(SellerAuctionPricingDto), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetSellerAuctionPricing([FromRoute] Guid id, CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.EnsureRole("seller", out var roleError)) return roleError;
+
+        return Ok(await _auctionService.GetSellerAuctionPricingAsync(userId, id, ct));
+    }
+
     /// <summary>Gets successful and failed auction statistics for a seller profile.</summary>
     [HttpGet("~/api/v1/sellers/{sellerId:guid}/auction-statistics")]
     [ProducesResponseType(typeof(SellerAuctionStatisticsDto), StatusCodes.Status200OK)]

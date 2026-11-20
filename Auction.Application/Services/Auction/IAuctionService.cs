@@ -11,6 +11,7 @@ public interface IAuctionService
     Task<PagedData<AuctionSummaryDto>> ListActiveAuctionsAsync(int page = 1, int pageSize = 20, AuctionListFilter? filter = null, CancellationToken cancellationToken = default);
 
     /// <summary>Lấy danh sách phiên của riêng một seller, có phân trang và lọc theo trạng thái.</summary>
+    Task<SellerAuctionPricingDto> GetSellerAuctionPricingAsync(Guid sellerId, Guid auctionId, CancellationToken cancellationToken = default);
     Task<PagedData<AuctionSummaryDto>> ListSellerAuctionsAsync(Guid sellerId, int page = 1, int pageSize = 20, string? status = null, CancellationToken cancellationToken = default);
 
     /// <summary>Lấy danh sách phiên đấu giá mà caller đã tham gia (gom theo từng phiên).</summary>
