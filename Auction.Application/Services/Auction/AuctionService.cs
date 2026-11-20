@@ -1302,6 +1302,9 @@ public sealed class AuctionService : IAuctionService
 
         _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
             auctionId, auction.SellerId, auction.SnapshotProductTitle, reason, now, actor.TraceId));
+        _notifications.NotifyReserveRestriction(new ReserveRestrictionNotification(
+            auctionId, auction.SellerId, penalty.ConsecutiveDeclineCount,
+            penalty.ConsecutiveDeclineCount >= AuctionRules.MaxConsecutiveReserveDeclines, penalty.ReserveRestrictedUntil, now, actor.TraceId));
 
         await SaveAsync(null, cancellationToken);
 

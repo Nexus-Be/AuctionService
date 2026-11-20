@@ -23,6 +23,8 @@ public static class NotificationPayloads
     public const string WatchlistNewBid = "auction-watchlist-bids";
     public const string ReportResolved = "auction-report-resolved";
     public const string Deposit = "auction-deposits";
+    public const string ReserveApprovalNeeded = "auction-reserve-approval-needed";
+    public const string ReserveRestriction = "auction-reserve-restriction";
 
     /// <summary>One serializer for queueing and for sending, so the stored payload and the sent body are the same text.</summary>
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
@@ -44,9 +46,35 @@ public static class NotificationPayloads
     public static Guid OrderPaidId(AuctionOrderPaidNotification n) => DeterministicGuid($"auction-order-paid:{n.ResultId:N}:{n.OrderId:N}");
     public static Guid WatchlistNewBidId(WatchlistNewBidNotification n) => DeterministicGuid($"auction-watchlist-bid:{n.TriggerBidId:N}");
     public static Guid ReportResolvedId(AuctionReportResolvedNotification n) => DeterministicGuid($"auction-report-resolved:{n.AuctionId:N}:{n.Outcome}:{n.ResolvedAt:O}");
+    public static Guid ReserveApprovalId(ReserveApprovalNeededNotification n) => DeterministicGuid($"auction-reserve-approval:{n.AuctionId:N}:{n.ApprovalDeadlineAt:O}");
+    public static Guid ReserveRestrictionId(ReserveRestrictionNotification n) => DeterministicGuid($"auction-reserve-restriction:{n.SellerUserId:N}:{n.ConsecutiveDeclineCount}:{n.OccurredAt:O}");
     public static Guid DepositId(AuctionDepositNotification n) => DeterministicGuid($"auction-deposit:{n.DepositId:N}:{n.DepositStatus}");
 
     // ------------------------------------------------------------------ bodies
+
+    public static object BuildReserveApprovalNeeded(ReserveApprovalNeededNotification n) => new
+    {
+        sourceEventId = ReserveApprovalId(n),
+        auctionId = n.AuctionId,
+        sellerUserId = n.SellerUserId,
+        auctionTitle = CleanTitle(n.AuctionTitle),
+        highestBidAmount = n.HighestBidAmount,
+        reservePriceAmount = n.ReservePriceAmount,
+        currency = "VND",
+        approvalDeadlineAt = n.ApprovalDeadlineAt,
+        traceId = Clip(n.TraceId, 100)
+    };
+
+    public static object BuildReserveRestriction(ReserveRestrictionNotification n) => new
+    {
+        sourceEventId = ReserveRestrictionId(n),
+        sellerUserId = n.SellerUserId,
+        consecutiveDeclineCount = n.ConsecutiveDeclineCount,
+        isRestricted = n.IsRestricted,
+        restrictedUntil = n.IsRestricted ? n.RestrictedUntil : null,
+        occurredAt = n.OccurredAt,
+        traceId = Clip(n.TraceId, 100)
+    };
 
     public static object BuildOutbid(BidOutbidNotification n) => new
     {
