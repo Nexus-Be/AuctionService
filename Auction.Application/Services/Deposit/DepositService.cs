@@ -1067,19 +1067,8 @@ public sealed class DepositService : IDepositService
                     if (settlement.OrderId is null)
                         continue;
 
-                    var sellerId = await _dbContext.Auctions
-                        .AsNoTracking()
-                        .Where(a => a.Id == settlement.AuctionId)
-                        .Select(a => (Guid?)a.SellerId)
-                        .FirstOrDefaultAsync(cancellationToken);
-
                     var amount = settlement.BuyNowGoodsAmount ?? 0m;
-                    var transfers = new[]
-                    {
-                        new HoldTransferInstruction(
-                            "SYSTEM_ESCROW", sellerId, amount,
-                            $"Buy Now goods payment for auction {settlement.AuctionId}, order {settlement.OrderId}.")
-                    };
+                    var transfers = BuyNowGoodsCaptureTransfers(amount, settlement.AuctionId, settlement.OrderId.Value);
                     await _wallet.CaptureDepositHoldAsync(
                         settlement.BuyNowGoodsHoldId!,
                         new CaptureDepositHoldCommand("OrderPayment", amount, transfers, settlement.OrderId),
@@ -1116,6 +1105,18 @@ public sealed class DepositService : IDepositService
             }
         }
     }
+
+    /// <summary>
+    /// The transfer that captures a Buy Now goods hold into the order escrow. Wallet accepts exactly one SYSTEM_ESCROW transfer **without an
+    /// owner** for an ORDER_PAYMENT capture (the seller is paid later by the order payout), so the seller id must not be sent here: sending it
+    /// made Wallet answer 400 and the goods hold stayed Held forever, locking the buyer's money and leaving nothing to pay the seller from.
+    /// </summary>
+    internal static HoldTransferInstruction[] BuyNowGoodsCaptureTransfers(decimal amount, Guid auctionId, Guid orderId) => new[]
+    {
+        new HoldTransferInstruction(
+            "SYSTEM_ESCROW", null, amount,
+            $"Buy Now goods payment for auction {auctionId}, order {orderId}.")
+    };
 
     /// <summary>How long an Authorized deposit on a closed auction is left alone, so a settlement that is still being processed is not raced.</summary>
     internal static readonly TimeSpan OrphanedDepositGrace = TimeSpan.FromMinutes(5);
