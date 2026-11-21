@@ -226,7 +226,10 @@ public sealed class BidService : IBidService
             history.UpdatedAt = now;
         }
 
-        var bidSeq = state.BidCount + 1;
+        var maxBidSeq = await _dbContext.Bids
+            .Where(b => b.AuctionId == auctionId)
+            .MaxAsync(b => (int?)b.BidSeq, cancellationToken) ?? 0;
+        var bidSeq = maxBidSeq + 1;
         var bid = new Bid
         {
             Id = Guid.NewGuid(),

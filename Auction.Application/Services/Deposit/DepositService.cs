@@ -997,17 +997,26 @@ public sealed class DepositService : IDepositService
                 ? deposit.PendingAction
                 : DepositPendingAction.Release;
 
-            switch (action)
+            try
             {
-                case DepositPendingAction.Release:
-                    await ProcessSingleDepositReleaseAsync(deposit, cancellationToken);
-                    break;
-                case DepositPendingAction.Capture:
-                    await ProcessSingleDepositCaptureAsync(deposit, cancellationToken);
-                    break;
-                case DepositPendingAction.Refund:
-                    await ProcessSingleDepositRefundAsync(deposit, cancellationToken);
-                    break;
+                switch (action)
+                {
+                    case DepositPendingAction.Release:
+                        await ProcessSingleDepositReleaseAsync(deposit, cancellationToken);
+                        break;
+                    case DepositPendingAction.Capture:
+                        await ProcessSingleDepositCaptureAsync(deposit, cancellationToken);
+                        break;
+                    case DepositPendingAction.Refund:
+                        await ProcessSingleDepositRefundAsync(deposit, cancellationToken);
+                        break;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Deposit retry failed for deposit {DepositId} (action {Action}).", deposit.Id, action);
+                if (_dbContext is DbContext efContext)
+                    efContext.ChangeTracker.Clear();
             }
         }
 
@@ -1025,11 +1034,39 @@ public sealed class DepositService : IDepositService
         foreach (var deposit in stuckPending)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await ReconcilePendingDepositAsync(deposit, now, cancellationToken);
+            try
+            {
+                await ReconcilePendingDepositAsync(deposit, now, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Pending deposit reconciliation failed for deposit {DepositId}.", deposit.Id);
+                if (_dbContext is DbContext efContext)
+                    efContext.ChangeTracker.Clear();
+            }
         }
 
-        await ReconcileOrphanedDepositsAsync(limit, cancellationToken);
-        await ProcessDueBuyNowGoodsHoldsAsync(limit, cancellationToken);
+        try
+        {
+            await ReconcileOrphanedDepositsAsync(limit, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Orphaned deposit reconciliation batch failed.");
+            if (_dbContext is DbContext efContext)
+                efContext.ChangeTracker.Clear();
+        }
+
+        try
+        {
+            await ProcessDueBuyNowGoodsHoldsAsync(limit, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Buy Now goods hold retry batch failed.");
+            if (_dbContext is DbContext efContext)
+                efContext.ChangeTracker.Clear();
+        }
     }
 
     /// <summary>Captures or releases the separate goods hold created by Buy Now (BuyNowPrice - DepositAmount).</summary>
