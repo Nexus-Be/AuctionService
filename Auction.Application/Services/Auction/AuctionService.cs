@@ -1740,8 +1740,8 @@ public sealed class AuctionService : IAuctionService
         var isOverdue = !isFinished && deadlineAt is not null && deadlineAt.Value < now;
 
         // Saga bắt đầu khi settlement được tạo (hoặc khi chốt kết quả nếu chưa có settlement) và cập nhật theo lần thay đổi gần nhất của các phần liên quan.
-        var createdAt = settlement?.CreatedAt ?? result.CreatedAt;
-        var updatedAt = new[] { state.UpdatedAt, result.UpdatedAt, settlement?.UpdatedAt ?? createdAt, offer?.UpdatedAt ?? createdAt }.Max();
+        var createdAt = settlement?.CreatedAt ?? result?.CreatedAt ?? auction.CreatedAt;
+        var updatedAt = new[] { state.UpdatedAt, result?.UpdatedAt ?? createdAt, settlement?.UpdatedAt ?? createdAt, offer?.UpdatedAt ?? createdAt }.Max();
 
         return new AuctionSagaDto(
             auction.Id, "AuctionSettlement", current.Name,
@@ -2297,7 +2297,7 @@ public sealed class AuctionService : IAuctionService
         if (paymentStatus == SettlementPaymentStatus.Paid)
         {
             await TryResetPaymentStreakAsync(
-                auction, orderId, winnerId, isSecondChanceNonPayment, auction.AuctionSettlement.PaidAt ?? now, cancellationToken);
+                auction, orderId, winnerId, isSecondChanceNonPayment, auction.AuctionSettlement?.PaidAt ?? now, cancellationToken);
         }
         else if (paymentStatus is SettlementPaymentStatus.Expired or SettlementPaymentStatus.PaymentTimedOut or SettlementPaymentStatus.Failed)
         {
@@ -3689,7 +3689,7 @@ public sealed class AuctionService : IAuctionService
 
         var items = rows
             .Select(r => new WinnerOfferDto(
-                r.OfferId, r.AuctionId, r.Title, r.BidId, r.Amount, r.Status,
+                r.OfferId, r.AuctionId, r.Title ?? string.Empty, r.BidId, r.Amount, r.Status,
                 r.Status == AuctionWinnerOfferStatus.Pending && r.ExpiresAt <= now,
                 r.OfferedAt, r.ExpiresAt, r.RespondedAt, r.ResponseReason))
             .ToList();
