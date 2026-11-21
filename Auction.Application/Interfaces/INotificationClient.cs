@@ -40,7 +40,31 @@ public interface INotificationClient
 
     /// <summary>Notifies a bidder when their deposit is held, released, captured, or refunded.</summary>
     void NotifyAuctionDeposit(AuctionDepositNotification notification);
+
+    /// <summary>Tells the seller that the highest bid is below the reserve price and a decision is needed before the approval deadline.</summary>
+    void NotifyReserveApprovalNeeded(ReserveApprovalNeededNotification notification);
+
+    /// <summary>Warns the seller after the 2nd consecutive refusal, or restricts them from the 3rd one (including a timeout).</summary>
+    void NotifyReserveRestriction(ReserveRestrictionNotification notification);
 }
+
+public sealed record ReserveApprovalNeededNotification(
+    Guid AuctionId,
+    Guid SellerUserId,
+    string? AuctionTitle,
+    decimal HighestBidAmount,
+    decimal ReservePriceAmount,
+    DateTimeOffset ApprovalDeadlineAt,
+    string? TraceId = null);
+
+public sealed record ReserveRestrictionNotification(
+    Guid AuctionId,
+    Guid SellerUserId,
+    int ConsecutiveDeclineCount,
+    bool IsRestricted,
+    DateTimeOffset? RestrictedUntil,
+    DateTimeOffset OccurredAt,
+    string? TraceId = null);
 
 public sealed record AuctionDepositNotification(
     Guid AuctionId,

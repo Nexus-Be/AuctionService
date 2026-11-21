@@ -12,6 +12,7 @@ public static class DependencyInjection
     public static IServiceCollection AddApplicationServices(this IServiceCollection services)
     {
         services.AddSingleton(TimeProvider.System);
+        services.AddScoped<Auction.Application.Services.Audit.IAuditSyncSourceService, Auction.Application.Services.Audit.AuditSyncSourceService>();
         services.AddScoped<IAuctionService, AuctionService>();
         services.AddScoped<IBidService, BidService>();
         services.AddScoped<IDepositService, DepositService>();

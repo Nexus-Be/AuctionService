@@ -120,6 +120,20 @@ public sealed class NotificationClient : INotificationClient
         Add(NotificationPayloads.Deposit, notification.AuctionId, NotificationPayloads.DepositId(notification),
             NotificationPayloads.BuildDeposit(notification), context: null);
 
+    public void NotifyReserveApprovalNeeded(ReserveApprovalNeededNotification notification) =>
+        Add(NotificationPayloads.ReserveApprovalNeeded, notification.AuctionId, NotificationPayloads.ReserveApprovalId(notification),
+            NotificationPayloads.BuildReserveApprovalNeeded(notification), context: null);
+
+    public void NotifyReserveRestriction(ReserveRestrictionNotification notification)
+    {
+        // Only the 2nd refusal (warning) and the 3rd and later (restriction) are sent; the 1st carries no message.
+        if (notification.ConsecutiveDeclineCount < 2)
+            return;
+
+        Add(NotificationPayloads.ReserveRestriction, notification.AuctionId, NotificationPayloads.ReserveRestrictionId(notification),
+            NotificationPayloads.BuildReserveRestriction(notification), context: null);
+    }
+
     private void Add(string kind, Guid auctionId, Guid eventId, object? payload, object? context)
     {
         if (!_options.Enabled)

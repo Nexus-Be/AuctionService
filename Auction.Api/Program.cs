@@ -185,6 +185,19 @@ using (var scope = app.Services.CreateScope())
 
 app.MapControllers();
 app.MapHub<AuctionHub>(AuctionHub.Route);
-app.MapGet("/health", () => Results.Ok(new { status = "Healthy", service = "auction-service" }));
+// Readiness, not just "the process is up": the database must answer, otherwise 503 so the central health view can tell.
+app.MapGet("/health", async (global::Auction.Infrastructure.Persistence.AppDbContext db, CancellationToken ct) =>
+{
+    try
+    {
+        return await db.Database.CanConnectAsync(ct)
+            ? Results.Ok(new { status = "Healthy", service = "auction-service" })
+            : Results.Json(new { status = "Unhealthy", service = "auction-service", message = "The database is not reachable." }, statusCode: 503);
+    }
+    catch (Exception)
+    {
+        return Results.Json(new { status = "Unhealthy", service = "auction-service", message = "The database check failed." }, statusCode: 503);
+    }
+});
 
 app.Run();
