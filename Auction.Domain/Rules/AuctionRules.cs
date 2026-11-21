@@ -119,6 +119,13 @@ public static class AuctionRules
         }
     }
 
+    /// <summary>
+    /// Whether the result of an auction tells the viewer that the seller still has to approve a sale below the reserve price.
+    /// Only the seller and staff may know it: the winner learning that the bid was under the reserve would reveal the secret price.
+    /// </summary>
+    public static bool ShowsSellerApproval(AuctionSettlementStatus settlementStatus, bool isSeller, bool isPrivileged)
+        => settlementStatus == AuctionSettlementStatus.AwaitingSellerApproval && (isSeller || isPrivileged);
+
     /// <summary>Returns true when the Buy Now button is currently open for a running auction.</summary>
     public static bool IsBuyNowAvailable(
         AuctionStatus status, decimal? reservePriceAmount, decimal? buyNowPriceAmount, decimal? currentPriceAmount, int bidCount)

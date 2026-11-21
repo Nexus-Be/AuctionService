@@ -331,6 +331,11 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
         {
             _notifications.NotifyAuctionWinner(winnerNotice);
         }
+        else if (isBelowReserve && winningBid is not null && auction.ReservePriceAmount is { } reservePrice)
+        {
+            _notifications.NotifyReserveApprovalNeeded(new ReserveApprovalNeededNotification(
+                auctionId, auction.SellerId, auction.SnapshotProductTitle, winningBid.Amount, reservePrice, now.AddHours(AuctionRules.SellerReserveApprovalWindowHours)));
+        }
         else if (winningBid is null)
         {
             _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
@@ -843,6 +848,9 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
                 auction.Id, auction.SellerId, auction.SnapshotProductTitle,
                 "ReserveNotMet: Seller approval timed out after 12 hours.", now, null));
+            _notifications.NotifyReserveRestriction(new ReserveRestrictionNotification(
+                auction.Id, auction.SellerId, penalty.ConsecutiveDeclineCount,
+                penalty.ConsecutiveDeclineCount >= AuctionRules.MaxConsecutiveReserveDeclines, penalty.ReserveRestrictedUntil, now));
 
             if (await TrySaveAsync(cancellationToken))
             {
