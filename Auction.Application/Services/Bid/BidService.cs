@@ -132,7 +132,7 @@ public sealed class BidService : IBidService
 
         var items = rows
             .Select(r => new MyBidDto(
-                r.BidId, r.AuctionId, r.Title, r.Status, r.SequenceNo,
+                r.BidId, r.AuctionId, r.Title ?? string.Empty, r.Status, r.SequenceNo,
                 r.Amount, r.PlacedAt, r.IsOutbid, r.IsWinning, r.IsInvalidated))
             .ToList();
 
