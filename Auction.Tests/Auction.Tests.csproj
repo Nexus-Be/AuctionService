@@ -17,6 +17,7 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <PackageReference Include="FluentAssertions" Version="6.12.0" />
+    <PackageReference Include="Moq" Version="4.20.70" />
   </ItemGroup>
 
   <ItemGroup>
@@ -24,6 +25,7 @@
     <ProjectReference Include="..\Auction.Domain\Auction.Domain.csproj" />
     <ProjectReference Include="..\Auction.Application\Auction.Application.csproj" />
     <ProjectReference Include="..\Auction.Infrastructure\Auction.Infrastructure.csproj" />
+    <ProjectReference Include="..\Auction.Api\Auction.Api.csproj" />
   </ItemGroup>
 
 </Project>

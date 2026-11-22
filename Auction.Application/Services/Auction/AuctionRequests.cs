@@ -99,14 +99,14 @@ public sealed record CreateAuctionReportRequest(AuctionReportReason? Reason, str
 
 public sealed record DismissAuctionReportsRequest(string? Note = null);
 
-/// <summary>Admin/Staff request to adjust auction start/end schedule for testing or operational purposes.</summary>
+/// <summary>Admin-only request (test environments only, see AdminTimeControls:Enabled) to adjust auction start/end schedule for testing.</summary>
 public sealed record AdminUpdateAuctionScheduleRequest(
     int? RemainingSeconds = null,
     DateTimeOffset? ScheduledStartAt = null,
     DateTimeOffset? ScheduledEndAt = null,
     string? Reason = null);
 
-/// <summary>Admin/Staff request to fast-forward or adjust post-auction deadlines (12h reserve approval, 24h payment, second-chance offer) for testing.</summary>
+/// <summary>Admin-only request (test environments only, see AdminTimeControls:Enabled) to fast-forward or adjust post-auction deadlines (12h reserve approval, 24h payment, second-chance offer) for testing.</summary>
 public sealed record AdminUpdateSettlementDeadlinesRequest(
     int? SellerApprovalRemainingSeconds = null,
     int? PaymentRemainingSeconds = null,

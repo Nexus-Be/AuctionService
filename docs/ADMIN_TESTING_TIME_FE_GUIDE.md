@@ -1,7 +1,8 @@
 # Hướng dẫn Frontend (Admin Panel) — Tích hợp API Tua nhanh Thời gian Phiên đấu giá (QA / Staging Test)
 
 > **Service:** AuctionService (Port `8005`)  
-> **Đối tượng sử dụng trên UI:** Chỉ hiển thị cho tài khoản có role **`admin`** hoặc **`staff`**.
+> **Đối tượng sử dụng trên UI:** Chỉ hiển thị cho tài khoản có role **`admin`** (không còn `staff`).
+> **Cổng môi trường (bắt buộc):** hai API chỉ hoạt động khi cấu hình `AdminTimeControls:Enabled=true` **và** service không chạy ở môi trường Production. Mặc định **tắt**; chỉ bật tường minh trên QA (biến môi trường `AdminTimeControls__Enabled=true`). Khi cổng đóng, cả hai API trả **404 `NOT_FOUND`** cho mọi người gọi (không lộ route tồn tại). Production luôn đóng, kể cả khi cờ bật. FE chỉ nên hiển thị khối này ở môi trường thử; ẩn nút trên FE không thay thế cổng ở BE.
 
 ---
 
@@ -24,7 +25,7 @@ Các API này phục vụ **Admin/QA thao tác trực tiếp trên giao diện c
 
 ### A. Giao diện gợi ý (Block "QA / Time Controls" trong Admin Auction Detail)
 
-Chỉ render block này nếu user hiện tại có role `admin` hoặc `staff`. Hiển thị các nút bấm nhanh theo trạng thái phiên:
+Chỉ render block này nếu user hiện tại có role `admin` và đang ở môi trường thử. Hiển thị các nút bấm nhanh theo trạng thái phiên:
 
 1. **Khi `status === "Scheduled"` (hoặc `"Draft"`):**
    - Nút **"Bắt đầu ngay (chạy 30 phút)"**:
@@ -63,7 +64,8 @@ Chỉ render block này nếu user hiện tại có role `admin` hoặc `staff`.
 
 | HTTP Status | `errorCode` | Nguyên nhân & Cách FE hiển thị |
 | :--- | :--- | :--- |
-| `403` | `ROLE_NOT_ALLOWED` | User không phải `admin`/`staff` (ẩn UI này với user thường). |
+| `403` | `ROLE_NOT_ALLOWED` | User không phải `admin` (staff cũng bị từ chối). |
+| `404` | `NOT_FOUND` | Cổng thời gian QA đang đóng (cờ tắt hoặc môi trường Production). Ẩn khối UI này. |
 | `404` | `AUCTION_NOT_FOUND` | Phiên không tồn tại hoặc đã bị xóa. |
 | `400` | `VAL_INVALID_INPUT` | Truyền thiếu field, số giây âm, hoặc `scheduledEndAt <= scheduledStartAt`. Hiển thị message từ `detail`/`message` của API. |
 | `409` | `INVALID_AUCTION_STATUS` | Phiên đã kết thúc/hủy rồi, hoặc cố sửa `scheduledStartAt` khi phiên đang `Running`. FE cần refetch lại trạng thái mới nhất của phiên. |
