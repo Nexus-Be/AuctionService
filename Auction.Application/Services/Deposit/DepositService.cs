@@ -1104,19 +1104,8 @@ public sealed class DepositService : IDepositService
                     if (settlement.OrderId is null)
                         continue;
 
-                    var sellerId = await _dbContext.Auctions
-                        .AsNoTracking()
-                        .Where(a => a.Id == settlement.AuctionId)
-                        .Select(a => (Guid?)a.SellerId)
-                        .FirstOrDefaultAsync(cancellationToken);
-
                     var amount = settlement.BuyNowGoodsAmount ?? 0m;
-                    var transfers = new[]
-                    {
-                        new HoldTransferInstruction(
-                            "SYSTEM_ESCROW", sellerId, amount,
-                            $"Buy Now goods payment for auction {settlement.AuctionId}, order {settlement.OrderId}.")
-                    };
+                    var transfers = BuyNowGoodsCaptureTransfers(settlement.AuctionId, settlement.OrderId.Value, amount);
                     await _wallet.CaptureDepositHoldAsync(
                         settlement.BuyNowGoodsHoldId!,
                         new CaptureDepositHoldCommand("OrderPayment", amount, transfers, settlement.OrderId),
@@ -1544,6 +1533,17 @@ public sealed class DepositService : IDepositService
             deposit.AuctionId, title, deposit.Id, deposit.BidderId,
             deposit.Amount, depositStatus, reason, occurredAt, traceId));
     }
+
+    public static IReadOnlyList<HoldTransferInstruction> BuyNowGoodsCaptureTransfers(
+        Guid auctionId, Guid orderId, decimal amount) =>
+        new[]
+        {
+            new HoldTransferInstruction(
+                "SYSTEM_ESCROW",
+                null,
+                amount,
+                $"Buy Now goods payment for auction {auctionId}, order {orderId}.")
+        };
 
     private static IReadOnlyList<HoldTransferInstruction> BuildCaptureTransfers(
         AuctionDeposit deposit, string purpose, Guid? sellerId, decimal sellerPercent = 70m)
