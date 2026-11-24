@@ -115,7 +115,7 @@ builder.Services.AddSingleton<CatalogSyncQueue>();
 builder.Services.AddSingleton<ICatalogSync>(sp => sp.GetRequiredService<CatalogSyncQueue>());
 builder.Services.AddHostedService<CatalogSyncWorker>();
 
-// Đẩy settlement sang Commerce để tạo đơn cho người thắng: hàng đợi trong bộ nhớ, gửi nền, thử lại khi lỗi. Mặc định tắt (Commerce:Enabled).
+// Đẩy settlement sang Commerce để tạo đơn cho người thắng: hàng đợi trong bộ nhớ, gửi nền, thử lại khi lỗi. Mặc định bật (Commerce:Enabled), chỉ tắt khi cấu hình false.
 var commerceOptions = CommerceOptions.FromConfiguration(builder.Configuration);
 builder.Services.AddSingleton(commerceOptions);
 builder.Services.AddHttpClient<ICommerceClient, CommerceClient>(client =>
@@ -159,6 +159,9 @@ builder.Services.AddControllers()
     });
 
 var app = builder.Build();
+
+if (!commerceOptions.Enabled)
+    app.Logger.LogWarning("Commerce sync is DISABLED (Commerce:Enabled=false). Winning auction settlements will not be pushed to Commerce.");
 
 // 4. Default Middleware Pipeline (Exception Handler, Swagger UI)
 app.UseServiceDefaults();
