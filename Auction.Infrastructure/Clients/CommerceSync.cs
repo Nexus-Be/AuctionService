@@ -14,12 +14,12 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-/// <summary>Cấu hình gọi Commerce: Commerce:Enabled (mặc định tắt), Commerce:BaseUrl (mặc định http://localhost:8003), Commerce:TimeoutSeconds (mặc định 10).</summary>
+/// <summary>Cấu hình gọi Commerce: Commerce:Enabled (mặc định bật, chỉ tắt khi cấu hình false), Commerce:BaseUrl (mặc định http://localhost:8003), Commerce:TimeoutSeconds (mặc định 10).</summary>
 public sealed record CommerceOptions(bool Enabled, string BaseUrl, int TimeoutSeconds)
 {
     public static CommerceOptions FromConfiguration(IConfiguration configuration)
     {
-        var enabled = bool.TryParse(configuration["Commerce:Enabled"], out var parsedEnabled) && parsedEnabled;
+        var enabled = !bool.TryParse(configuration["Commerce:Enabled"], out var parsedEnabled) || parsedEnabled;
         var baseUrl = configuration["Commerce:BaseUrl"];
         var timeout = int.TryParse(configuration["Commerce:TimeoutSeconds"], out var parsedTimeout) && parsedTimeout > 0
             ? parsedTimeout
