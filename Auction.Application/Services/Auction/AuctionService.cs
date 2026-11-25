@@ -1085,32 +1085,6 @@ public sealed class AuctionService : IAuctionService
             UpdatedAt = now
         });
 
-        // The Buy Now bid is a real bid, so it must show in the public bid history and in the buyer's own bids like any other bid:
-        // the previous leader is no longer winning, and the buy-now bid takes the winning mark.
-        var previousLeaders = await _dbContext.BidHistories
-            .Where(h => h.AuctionId == auctionId && h.IsWinning)
-            .ToListAsync(cancellationToken);
-        foreach (var leader in previousLeaders)
-        {
-            leader.IsWinning = false;
-            leader.IsOutbid = true;
-            leader.UpdatedAt = now;
-        }
-
-        _dbContext.BidHistories.Add(new BidHistory
-        {
-            Id = Guid.NewGuid(),
-            AuctionId = auctionId,
-            BidId = buyNowBid.Id,
-            SequenceNo = nextBidSeq,
-            BidderId = actor.UserId,
-            Amount = buyNowPrice,
-            PlacedAt = now,
-            IsWinning = true,
-            CreatedAt = now,
-            UpdatedAt = now
-        });
-
         state.Status = AuctionStatus.Ended;
         state.EndedAt = now;
         state.CurrentWinnerId = actor.UserId;
