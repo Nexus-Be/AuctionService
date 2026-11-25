@@ -458,6 +458,8 @@ public sealed class AuctionService : IAuctionService
         foreach (var history in histories)
         {
             history.IsInvalidated = true;
+            history.IsWinning = false;
+            history.IsOutbid = false;
             history.UpdatedAt = now;
         }
 
@@ -466,8 +468,21 @@ public sealed class AuctionService : IAuctionService
             .Where(b => b.AuctionId == auctionId && b.Id != bidId && !b.IsDeleted && b.BidInvalidation == null)
             .OrderByDescending(b => b.Amount)
             .ThenBy(b => b.BidSeq)
-            .Select(b => new { b.BidderId, b.Amount })
+            .Select(b => new { b.Id, b.BidderId, b.Amount })
             .FirstOrDefaultAsync(cancellationToken);
+
+        if (remainingTop is not null)
+        {
+            var newTopHistories = await _dbContext.BidHistories
+                .Where(h => h.AuctionId == auctionId && h.BidId == remainingTop.Id && !h.IsDeleted)
+                .ToListAsync(cancellationToken);
+            foreach (var topHistory in newTopHistories)
+            {
+                topHistory.IsWinning = true;
+                topHistory.IsOutbid = false;
+                topHistory.UpdatedAt = now;
+            }
+        }
 
         var remainingCount = await _dbContext.Bids
             .AsNoTracking()
@@ -958,11 +973,26 @@ public sealed class AuctionService : IAuctionService
                 depositEntity.UpdatedAt = now;
             }
 
-            var depHold = await _wallet.CreateDepositHoldAsync(
-                new CreateDepositHoldCommand(
-                    depositEntity.Id, actor.UserId, depositAmount, DepositRules.Currency, auctionId, policy.Version),
-                $"buynow-dep:{depositEntity.Id:N}:{depositEntity.AttemptCount}",
-                cancellationToken);
+            // Persist Pending deposit before calling Wallet so timeouts can be reconciled by the background worker.
+            await _dbContext.SaveChangesAsync(cancellationToken);
+
+            DepositHoldCreated depHold;
+            try
+            {
+                depHold = await _wallet.CreateDepositHoldAsync(
+                    new CreateDepositHoldCommand(
+                        depositEntity.Id, actor.UserId, depositAmount, DepositRules.Currency, auctionId, policy.Version),
+                    $"buynow-dep:{depositEntity.Id:N}:{depositEntity.AttemptCount}",
+                    cancellationToken);
+            }
+            catch (DomainException ex) when (ex.StatusCode < 500)
+            {
+                depositEntity.Status = DepositStatus.Failed;
+                depositEntity.FailureCode = ex.ErrorCode;
+                depositEntity.UpdatedAt = DateTimeOffset.UtcNow;
+                await _dbContext.SaveChangesAsync(CancellationToken.None);
+                throw;
+            }
             if (depHold.Status != DepositHoldState.Authorized)
                 throw new DomainException("DEPOSIT_HOLD_NOT_ACTIVE", "Could not lock the Buy Now deposit in your wallet.", 409);
 
@@ -1012,7 +1042,21 @@ public sealed class AuctionService : IAuctionService
 
         var fromStatus = state.Status;
         var paymentDeadline = now.Add(WinnerPaymentWindow);
-        var nextBidSeq = state.BidCount + 1;
+        var maxBidSeq = await _dbContext.Bids
+            .Where(b => b.AuctionId == auctionId)
+            .MaxAsync(b => (int?)b.BidSeq, cancellationToken) ?? 0;
+        var nextBidSeq = maxBidSeq + 1;
+
+        var previousWinningHistories = await _dbContext.BidHistories
+            .Where(h => h.AuctionId == auctionId && h.IsWinning && !h.IsDeleted)
+            .ToListAsync(cancellationToken);
+        foreach (var prev in previousWinningHistories)
+        {
+            prev.IsWinning = false;
+            prev.IsOutbid = true;
+            prev.UpdatedAt = now;
+        }
+
         var buyNowBid = new Bid
         {
             Id = Guid.NewGuid(),
@@ -1025,6 +1069,21 @@ public sealed class AuctionService : IAuctionService
             UpdatedAt = now
         };
         _dbContext.Bids.Add(buyNowBid);
+        _dbContext.BidHistories.Add(new BidHistory
+        {
+            Id = Guid.NewGuid(),
+            AuctionId = auctionId,
+            BidId = buyNowBid.Id,
+            SequenceNo = nextBidSeq,
+            BidderId = actor.UserId,
+            Amount = buyNowPrice,
+            PlacedAt = now,
+            IsWinning = true,
+            IsOutbid = false,
+            IsInvalidated = false,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
 
         // The Buy Now bid is a real bid, so it must show in the public bid history and in the buyer's own bids like any other bid:
         // the previous leader is no longer winning, and the buy-now bid takes the winning mark.
@@ -1056,7 +1115,7 @@ public sealed class AuctionService : IAuctionService
         state.EndedAt = now;
         state.CurrentWinnerId = actor.UserId;
         state.CurrentPriceAmount = buyNowPrice;
-        state.BidCount = nextBidSeq;
+        state.BidCount += 1;
         state.UpdatedAt = now;
         state.RowVersion += 1;
 
@@ -1157,7 +1216,7 @@ public sealed class AuctionService : IAuctionService
             userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
 
         _notifications.NotifyAuctionWinner(new AuctionWinnerNotification(
-            auctionId, auction.SnapshotProductTitle, result.Id, result.Id,
+            auctionId, auction.SnapshotProductTitle, result.Id, buyNowBid.Id,
             actor.UserId, auction.SellerId, buyNowPrice, now, paymentDeadline));
 
         try
@@ -1281,6 +1340,9 @@ public sealed class AuctionService : IAuctionService
             throw new DomainException("NOT_AWAITING_SELLER_APPROVAL", "This auction is not awaiting seller reserve approval.", 409);
         }
 
+        if (settlement.SellerApprovalDeadlineAt is { } deadline && deadline <= now)
+            throw new DomainException("SELLER_APPROVAL_EXPIRED", "The 12-hour seller approval window has expired.", 409);
+
         var reason = string.IsNullOrWhiteSpace(request?.Reason)
             ? "ReserveNotMet: Seller declined to sell below the reserve price."
             : $"ReserveNotMet: {request.Reason.Trim()}";
@@ -1318,6 +1380,11 @@ public sealed class AuctionService : IAuctionService
                 UpdatedAt = now
             };
             _dbContext.SellerReservePenalties.Add(penalty);
+        }
+        if (penalty.ReserveRestrictedUntil is { } restrictedUntil && restrictedUntil <= now)
+        {
+            penalty.ConsecutiveDeclineCount = 0;
+            penalty.ReserveRestrictedUntil = null;
         }
         penalty.ConsecutiveDeclineCount += 1;
         if (penalty.ConsecutiveDeclineCount >= AuctionRules.MaxConsecutiveReserveDeclines)
@@ -1699,8 +1766,8 @@ public sealed class AuctionService : IAuctionService
         var isOverdue = !isFinished && deadlineAt is not null && deadlineAt.Value < now;
 
         // Saga bắt đầu khi settlement được tạo (hoặc khi chốt kết quả nếu chưa có settlement) và cập nhật theo lần thay đổi gần nhất của các phần liên quan.
-        var createdAt = settlement?.CreatedAt ?? result.CreatedAt;
-        var updatedAt = new[] { state.UpdatedAt, result.UpdatedAt, settlement?.UpdatedAt ?? createdAt, offer?.UpdatedAt ?? createdAt }.Max();
+        var createdAt = settlement?.CreatedAt ?? result?.CreatedAt ?? auction.CreatedAt;
+        var updatedAt = new[] { state.UpdatedAt, result?.UpdatedAt ?? createdAt, settlement?.UpdatedAt ?? createdAt, offer?.UpdatedAt ?? createdAt }.Max();
 
         return new AuctionSagaDto(
             auction.Id, "AuctionSettlement", current.Name,
@@ -2022,7 +2089,9 @@ public sealed class AuctionService : IAuctionService
         if (paymentStatus is SettlementPaymentStatus.SellerAccepted
             or SettlementPaymentStatus.SellerRejected
             or SettlementPaymentStatus.SellerExpired
-            || (state.Status == AuctionStatus.Settled && paymentStatus == SettlementPaymentStatus.Cancelled))
+            || ((state.Status is AuctionStatus.Settled or AuctionStatus.Ended)
+                && paymentStatus == SettlementPaymentStatus.Cancelled
+                && auction.AuctionSettlement?.Status == AuctionSettlementStatus.Paid))
         {
             return await HandleSellerDecisionAsync(
                 auction, orderId, winnerId, paymentStatus, eventId, requestHash, now, cancellationToken);
@@ -2254,7 +2323,7 @@ public sealed class AuctionService : IAuctionService
         if (paymentStatus == SettlementPaymentStatus.Paid)
         {
             await TryResetPaymentStreakAsync(
-                auction, orderId, winnerId, isSecondChanceNonPayment, auction.AuctionSettlement.PaidAt ?? now, cancellationToken);
+                auction, orderId, winnerId, isSecondChanceNonPayment, auction.AuctionSettlement?.PaidAt ?? now, cancellationToken);
         }
         else if (paymentStatus is SettlementPaymentStatus.Expired or SettlementPaymentStatus.PaymentTimedOut or SettlementPaymentStatus.Failed)
         {
@@ -3062,6 +3131,7 @@ public sealed class AuctionService : IAuctionService
     {
         var deposits = await _dbContext.AuctionDeposits
             .Where(d => d.AuctionId == auctionId && !d.IsDeleted &&
+                        d.PendingAction == DepositPendingAction.None &&
                         (d.Status == DepositStatus.Authorized || d.Status == DepositStatus.Pending))
             .ToListAsync(cancellationToken);
 
@@ -3645,7 +3715,7 @@ public sealed class AuctionService : IAuctionService
 
         var items = rows
             .Select(r => new WinnerOfferDto(
-                r.OfferId, r.AuctionId, r.Title, r.BidId, r.Amount, r.Status,
+                r.OfferId, r.AuctionId, r.Title ?? string.Empty, r.BidId, r.Amount, r.Status,
                 r.Status == AuctionWinnerOfferStatus.Pending && r.ExpiresAt <= now,
                 r.OfferedAt, r.ExpiresAt, r.RespondedAt, r.ResponseReason))
             .ToList();

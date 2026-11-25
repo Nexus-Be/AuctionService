@@ -418,9 +418,10 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             auction.NextRetryAt = now;
             auction.NeedsAttention = false;
 
-            // Lời mời quá hạn mà chưa nhận: không tính là bỏ kèo, mở khoá toàn bộ cọc còn đang giữ của phiên (cọc của người về nhì).
+            // Lời mời quá hạn mà chưa nhận: không tính là bỏ kèo, mở khoá toàn bộ cọc còn đang giữ của phiên (trừ các cọc đang chờ Capture/Refund/Release).
             var remainingDeposits = await _dbContext.AuctionDeposits
                 .Where(d => d.AuctionId == offer.AuctionId && !d.IsDeleted &&
+                            d.PendingAction == DepositPendingAction.None &&
                             (d.Status == DepositStatus.Authorized || d.Status == DepositStatus.Pending))
                 .ToListAsync(cancellationToken);
             foreach (var deposit in remainingDeposits)
@@ -737,10 +738,17 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
         }
         catch (DbUpdateConcurrencyException)
         {
-            // Drop any unsaved outbox rows so a retry or later SaveChanges on the same context does not duplicate them.
-            var unsavedOutbox = _dbContext.NotificationOutbox.Local.ToList();
-            if (unsavedOutbox.Count > 0)
-                _dbContext.NotificationOutbox.RemoveRange(unsavedOutbox);
+            // Clear the shared ChangeTracker so dirty entities from a failed item do not poison subsequent items in the batch.
+            if (_dbContext is DbContext efContext)
+            {
+                efContext.ChangeTracker.Clear();
+            }
+            else
+            {
+                var unsavedOutbox = _dbContext.NotificationOutbox.Local.ToList();
+                if (unsavedOutbox.Count > 0)
+                    _dbContext.NotificationOutbox.RemoveRange(unsavedOutbox);
+            }
             return false;
         }
     }
@@ -814,6 +822,11 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
                     UpdatedAt = now
                 };
                 _dbContext.SellerReservePenalties.Add(penalty);
+            }
+            if (penalty.ReserveRestrictedUntil is { } restrictedUntil && restrictedUntil <= now)
+            {
+                penalty.ConsecutiveDeclineCount = 0;
+                penalty.ReserveRestrictedUntil = null;
             }
             penalty.ConsecutiveDeclineCount += 1;
             if (penalty.ConsecutiveDeclineCount >= AuctionRules.MaxConsecutiveReserveDeclines)

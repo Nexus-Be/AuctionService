@@ -997,17 +997,26 @@ public sealed class DepositService : IDepositService
                 ? deposit.PendingAction
                 : DepositPendingAction.Release;
 
-            switch (action)
+            try
             {
-                case DepositPendingAction.Release:
-                    await ProcessSingleDepositReleaseAsync(deposit, cancellationToken);
-                    break;
-                case DepositPendingAction.Capture:
-                    await ProcessSingleDepositCaptureAsync(deposit, cancellationToken);
-                    break;
-                case DepositPendingAction.Refund:
-                    await ProcessSingleDepositRefundAsync(deposit, cancellationToken);
-                    break;
+                switch (action)
+                {
+                    case DepositPendingAction.Release:
+                        await ProcessSingleDepositReleaseAsync(deposit, cancellationToken);
+                        break;
+                    case DepositPendingAction.Capture:
+                        await ProcessSingleDepositCaptureAsync(deposit, cancellationToken);
+                        break;
+                    case DepositPendingAction.Refund:
+                        await ProcessSingleDepositRefundAsync(deposit, cancellationToken);
+                        break;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Deposit retry failed for deposit {DepositId} (action {Action}).", deposit.Id, action);
+                if (_dbContext is DbContext efContext)
+                    efContext.ChangeTracker.Clear();
             }
         }
 
@@ -1025,11 +1034,39 @@ public sealed class DepositService : IDepositService
         foreach (var deposit in stuckPending)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await ReconcilePendingDepositAsync(deposit, now, cancellationToken);
+            try
+            {
+                await ReconcilePendingDepositAsync(deposit, now, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Pending deposit reconciliation failed for deposit {DepositId}.", deposit.Id);
+                if (_dbContext is DbContext efContext)
+                    efContext.ChangeTracker.Clear();
+            }
         }
 
-        await ReconcileOrphanedDepositsAsync(limit, cancellationToken);
-        await ProcessDueBuyNowGoodsHoldsAsync(limit, cancellationToken);
+        try
+        {
+            await ReconcileOrphanedDepositsAsync(limit, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Orphaned deposit reconciliation batch failed.");
+            if (_dbContext is DbContext efContext)
+                efContext.ChangeTracker.Clear();
+        }
+
+        try
+        {
+            await ProcessDueBuyNowGoodsHoldsAsync(limit, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Buy Now goods hold retry batch failed.");
+            if (_dbContext is DbContext efContext)
+                efContext.ChangeTracker.Clear();
+        }
     }
 
     /// <summary>Captures or releases the separate goods hold created by Buy Now (BuyNowPrice - DepositAmount).</summary>
@@ -1068,7 +1105,7 @@ public sealed class DepositService : IDepositService
                         continue;
 
                     var amount = settlement.BuyNowGoodsAmount ?? 0m;
-                    var transfers = BuyNowGoodsCaptureTransfers(amount, settlement.AuctionId, settlement.OrderId.Value);
+                    var transfers = BuyNowGoodsCaptureTransfers(settlement.AuctionId, settlement.OrderId.Value, amount);
                     await _wallet.CaptureDepositHoldAsync(
                         settlement.BuyNowGoodsHoldId!,
                         new CaptureDepositHoldCommand("OrderPayment", amount, transfers, settlement.OrderId),
@@ -1111,12 +1148,8 @@ public sealed class DepositService : IDepositService
     /// owner** for an ORDER_PAYMENT capture (the seller is paid later by the order payout), so the seller id must not be sent here: sending it
     /// made Wallet answer 400 and the goods hold stayed Held forever, locking the buyer's money and leaving nothing to pay the seller from.
     /// </summary>
-    internal static HoldTransferInstruction[] BuyNowGoodsCaptureTransfers(decimal amount, Guid auctionId, Guid orderId) => new[]
-    {
-        new HoldTransferInstruction(
-            "SYSTEM_ESCROW", null, amount,
-            $"Buy Now goods payment for auction {auctionId}, order {orderId}.")
-    };
+    internal static HoldTransferInstruction[] BuyNowGoodsCaptureTransfers(decimal amount, Guid auctionId, Guid orderId) =>
+        BuyNowGoodsCaptureTransfers(auctionId, orderId, amount).ToArray();
 
     /// <summary>How long an Authorized deposit on a closed auction is left alone, so a settlement that is still being processed is not raced.</summary>
     internal static readonly TimeSpan OrphanedDepositGrace = TimeSpan.FromMinutes(5);
@@ -1508,6 +1541,17 @@ public sealed class DepositService : IDepositService
             deposit.AuctionId, title, deposit.Id, deposit.BidderId,
             deposit.Amount, depositStatus, reason, occurredAt, traceId));
     }
+
+    public static IReadOnlyList<HoldTransferInstruction> BuyNowGoodsCaptureTransfers(
+        Guid auctionId, Guid orderId, decimal amount) =>
+        new[]
+        {
+            new HoldTransferInstruction(
+                "SYSTEM_ESCROW",
+                null,
+                amount,
+                $"Buy Now goods payment for auction {auctionId}, order {orderId}.")
+        };
 
     private static IReadOnlyList<HoldTransferInstruction> BuildCaptureTransfers(
         AuctionDeposit deposit, string purpose, Guid? sellerId, decimal sellerPercent = 70m)
