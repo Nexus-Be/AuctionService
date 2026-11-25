@@ -80,7 +80,6 @@ Global
 		{F3DEA737-9558-4B4B-8588-C5526CBEC616}.Release|x64.Build.0 = Release|Any CPU
 		{F3DEA737-9558-4B4B-8588-C5526CBEC616}.Release|x86.ActiveCfg = Release|Any CPU
 		{F3DEA737-9558-4B4B-8588-C5526CBEC616}.Release|x86.Build.0 = Release|Any CPU
-	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
 	EndGlobalSection

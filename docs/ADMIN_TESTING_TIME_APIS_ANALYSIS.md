@@ -25,8 +25,9 @@
 ### Phân tích theo 5 tiêu chí (Who, What, When, Where, How)
 
 1. **Who (Ai được phép gọi?)**
-   - Bắt buộc đăng nhập (`TryGetUserId`) và có role **`admin`** hoặc **`staff`** (`HasRole("admin") || HasRole("staff")`).
-   - Buyer / Seller thường gọi sẽ bị chặn với HTTP `403 Forbidden` (`ROLE_NOT_ALLOWED`).
+   - Cổng môi trường (`RequireAdminTimeControls`): chỉ mở khi `AdminTimeControls:Enabled=true` và host không phải Production; đóng thì **404 `NOT_FOUND`** trước cả bước xác thực.
+   - Bắt buộc đăng nhập (`TryGetUserId`) và có role **`admin`** (không còn `staff`) (`HasRole("admin") || HasRole("staff")`).
+   - Staff, Buyer, Seller và mọi role khác gọi sẽ bị chặn với HTTP `403 Forbidden` (`ROLE_NOT_ALLOWED`).
 
 2. **What (API này làm gì?)**
    - Cho phép chỉnh sửa `ScheduledStartAt` (khi phiên chưa chạy) và/hoặc `AuctionState.ScheduledEndAt` (khi phiên đang `Draft`, `Scheduled`, hoặc `Running`).
@@ -83,7 +84,7 @@
 ### Phân tích theo 5 tiêu chí (Who, What, When, Where, How)
 
 1. **Who (Ai được phép gọi?)**
-   - Bắt buộc đăng nhập và có role **`admin`** hoặc **`staff`** (`403 ROLE_NOT_ALLOWED` nếu sai role).
+   - Cùng cổng môi trường như trên (đóng thì 404). Bắt buộc đăng nhập và có role **`admin`** (`403 ROLE_NOT_ALLOWED` nếu sai role, kể cả staff).
 
 2. **What (API này làm gì?)**
    - Tua nhanh hoặc dời 3 loại hạn chót sau khi phiên đã kết thúc:

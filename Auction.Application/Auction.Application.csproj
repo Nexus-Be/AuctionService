@@ -7,6 +7,10 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <InternalsVisibleTo Include="Auction.Tests" />
+    </ItemGroup>
+
+    <ItemGroup>
         <ProjectReference Include="..\Auction.Domain\Auction.Domain.csproj" />
     </ItemGroup>
 

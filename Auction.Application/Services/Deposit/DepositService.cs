@@ -1143,6 +1143,14 @@ public sealed class DepositService : IDepositService
         }
     }
 
+    /// <summary>
+    /// The transfer that captures a Buy Now goods hold into the order escrow. Wallet accepts exactly one SYSTEM_ESCROW transfer **without an
+    /// owner** for an ORDER_PAYMENT capture (the seller is paid later by the order payout), so the seller id must not be sent here: sending it
+    /// made Wallet answer 400 and the goods hold stayed Held forever, locking the buyer's money and leaving nothing to pay the seller from.
+    /// </summary>
+    internal static HoldTransferInstruction[] BuyNowGoodsCaptureTransfers(decimal amount, Guid auctionId, Guid orderId) =>
+        BuyNowGoodsCaptureTransfers(auctionId, orderId, amount).ToArray();
+
     /// <summary>How long an Authorized deposit on a closed auction is left alone, so a settlement that is still being processed is not raced.</summary>
     internal static readonly TimeSpan OrphanedDepositGrace = TimeSpan.FromMinutes(5);
 

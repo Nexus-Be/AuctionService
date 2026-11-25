@@ -381,8 +381,12 @@ public class AuctionsController : ControllerBase
         return Ok(result);
     }
 
-    /// <summary>Admin or Staff adjusts auction start/end schedule (e.g., fast-forward remaining time to test anti-sniping or closing).</summary>
+    /// <summary>
+    /// Admin only, and only where <c>AdminTimeControls:Enabled</c> is on and the host is not Production (otherwise 404): adjusts the auction
+    /// start/end schedule, for example to fast-forward the remaining time when testing anti-sniping or closing.
+    /// </summary>
     [HttpPatch("~/api/v1/admin/auctions/{id:guid}/schedule")]
+    [RequireAdminTimeControls]
     [ProducesResponseType(typeof(AdminAuctionScheduleUpdatedResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> AdminUpdateSchedule(
         [FromRoute] Guid id,
@@ -390,15 +394,19 @@ public class AuctionsController : ControllerBase
         CancellationToken ct)
     {
         if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
-        if (!this.HasRole("admin") && !this.HasRole("staff"))
-            return this.ForbiddenError("Only admin or staff accounts can access this resource.", "ROLE_NOT_ALLOWED");
+        if (!this.HasRole("admin"))
+            return this.ForbiddenError("Only admin accounts can access this resource.", "ROLE_NOT_ALLOWED");
 
         var result = await _auctionService.AdminUpdateScheduleAsync(CreateActor(userId), id, request, ct);
         return Ok(result);
     }
 
-    /// <summary>Admin or Staff adjusts post-auction deadlines (12h reserve approval, 24h payment, second-chance offer) for testing.</summary>
+    /// <summary>
+    /// Admin only, and only where <c>AdminTimeControls:Enabled</c> is on and the host is not Production (otherwise 404): adjusts post-auction
+    /// deadlines (12h reserve approval, 24h payment, second-chance offer) for testing.
+    /// </summary>
     [HttpPatch("~/api/v1/admin/auctions/{id:guid}/settlement-deadlines")]
+    [RequireAdminTimeControls]
     [ProducesResponseType(typeof(AdminSettlementDeadlinesUpdatedResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> AdminUpdateSettlementDeadlines(
         [FromRoute] Guid id,
@@ -406,8 +414,8 @@ public class AuctionsController : ControllerBase
         CancellationToken ct)
     {
         if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
-        if (!this.HasRole("admin") && !this.HasRole("staff"))
-            return this.ForbiddenError("Only admin or staff accounts can access this resource.", "ROLE_NOT_ALLOWED");
+        if (!this.HasRole("admin"))
+            return this.ForbiddenError("Only admin accounts can access this resource.", "ROLE_NOT_ALLOWED");
 
         var result = await _auctionService.AdminUpdateSettlementDeadlinesAsync(CreateActor(userId), id, request, ct);
         return Ok(result);
