@@ -483,7 +483,7 @@ public class AuctionsController : ControllerBase
     }
 
     /// <summary>Buyer views reports they submitted and admin responses.</summary>
-    [HttpGet("~/api/v1/me/reports")]
+    [HttpGet("~/api/v1/me/auction-reports")]
     [ProducesResponseType(typeof(PagedData<MyAuctionReportDto>), StatusCodes.Status200OK)]
     public async Task<IActionResult> ListMyReports(
         [FromQuery] int page = 1,

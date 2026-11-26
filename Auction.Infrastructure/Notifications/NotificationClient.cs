@@ -28,17 +28,20 @@ public sealed record NotificationOptions(bool Enabled, string BaseUrl, Guid Serv
 
     public static NotificationOptions FromConfiguration(IConfiguration configuration)
     {
-        var enabled = bool.TryParse(configuration["Notification:Enabled"], out var parsedEnabled) && parsedEnabled;
+        var enabled = !bool.TryParse(configuration["Notification:Enabled"], out var parsedEnabled) || parsedEnabled;
         var baseUrl = configuration["Notification:BaseUrl"];
         var serviceUser = Guid.TryParse(configuration["Notification:ServiceUserId"], out var parsedId) && parsedId != Guid.Empty
             ? parsedId
             : DefaultServiceUserId;
         var devEmail = configuration["Notification:DevWinnerEmail"];
-        var key = Environment.GetEnvironmentVariable("AUCTION_NOTIFICATION_SIGNING_KEY") ?? configuration["Notification:SigningKey"];
+        var key = Environment.GetEnvironmentVariable("AUCTION_NOTIFICATION_SIGNING_KEY")
+            ?? configuration["Notification:SigningKey"]
+            ?? configuration["AuctionNotificationAuth:SigningKey"]
+            ?? configuration["InternalSecurity:ServiceKey"];
 
         return new NotificationOptions(
             enabled,
-            string.IsNullOrWhiteSpace(baseUrl) ? "http://localhost:8080" : baseUrl.Trim(),
+            string.IsNullOrWhiteSpace(baseUrl) ? "http://localhost:8007" : baseUrl.Trim(),
             serviceUser,
             string.IsNullOrWhiteSpace(devEmail) ? null : devEmail.Trim(),
             string.IsNullOrWhiteSpace(key) ? null : key);
