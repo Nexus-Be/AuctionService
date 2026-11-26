@@ -372,6 +372,33 @@ public class AuctionsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Admin or Staff approves a PendingApproval auction so it moves to Scheduled.</summary>
+    [HttpPost("~/api/v1/admin/auctions/{id:guid}/approve")]
+    [ProducesResponseType(typeof(AuctionApprovalResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> Approve([FromRoute] Guid id, CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("admin") && !this.HasRole("staff"))
+            return this.ForbiddenError("Only admin or staff accounts can access this resource.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.ApproveAuctionAsync(CreateActor(userId), id, ct);
+        return Ok(result);
+    }
+
+    /// <summary>Admin or Staff rejects a PendingApproval auction with a required reason and unlocks the product in Catalog.</summary>
+    [HttpPost("~/api/v1/admin/auctions/{id:guid}/reject")]
+    [ProducesResponseType(typeof(AuctionApprovalResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> Reject(
+        [FromRoute] Guid id, [FromBody] RejectAuctionRequest request, CancellationToken ct)
+    {
+        if (!this.TryGetUserId(out var userId, out var errorResult)) return errorResult;
+        if (!this.HasRole("admin") && !this.HasRole("staff"))
+            return this.ForbiddenError("Only admin or staff accounts can access this resource.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.RejectAuctionAsync(CreateActor(userId), id, request, ct);
+        return Ok(result);
+    }
+
     /// <summary>Admin or Staff force-cancels an auction that has not ended. Reason is required.</summary>
     [HttpPost("~/api/v1/admin/auctions/{id:guid}/force-cancel")]
     [ProducesResponseType(typeof(AuctionCancelledResponse), StatusCodes.Status200OK)]

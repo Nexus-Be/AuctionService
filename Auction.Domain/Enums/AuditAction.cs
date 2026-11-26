@@ -26,5 +26,7 @@ public enum AuditAction
     AuctionReportResolve = 21,
     AuctionBuyNow = 22,
     ReserveApprovalAccept = 23,
-    ReserveApprovalDecline = 24
+    ReserveApprovalDecline = 24,
+    AuctionApprove = 25,
+    AuctionReject = 26
 }

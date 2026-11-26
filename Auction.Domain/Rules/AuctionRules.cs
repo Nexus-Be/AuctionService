@@ -169,13 +169,15 @@ public static class AuctionRules
     }
 
     /// <summary>
-    /// A seller can edit or cancel an auction only before it starts: the status must be Scheduled
-    /// and the start time must not have been reached yet.
+    /// A seller can edit or cancel an auction before it starts: PendingApproval is always editable (even if its
+    /// originally requested start time passed while waiting for review), while Scheduled is editable until start time.
     /// </summary>
     public static void EnsureNotStarted(
         AuctionStatus status, DateTimeOffset scheduledStartAt, DateTimeOffset now,
         string errorCode, string message, int statusCode)
     {
+        if (status == AuctionStatus.PendingApproval)
+            return;
         if (status != AuctionStatus.Scheduled || now >= scheduledStartAt)
             throw new BusinessRuleValidationException(errorCode, message, statusCode);
     }
