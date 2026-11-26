@@ -25,6 +25,9 @@ public static class NotificationPayloads
     public const string Deposit = "auction-deposits";
     public const string ReserveApprovalNeeded = "auction-reserve-approval-needed";
     public const string ReserveRestriction = "auction-reserve-restriction";
+    public const string SellerResult = "auction-seller-results";
+    public const string PaymentTimeout = "auction-payment-timeouts";
+    public const string SellerPaymentTimeout = "auction-seller-payment-timeouts";
 
     /// <summary>One serializer for queueing and for sending, so the stored payload and the sent body are the same text.</summary>
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
@@ -49,6 +52,9 @@ public static class NotificationPayloads
     public static Guid ReserveApprovalId(ReserveApprovalNeededNotification n) => DeterministicGuid($"auction-reserve-approval:{n.AuctionId:N}:{n.ApprovalDeadlineAt:O}");
     public static Guid ReserveRestrictionId(ReserveRestrictionNotification n) => DeterministicGuid($"auction-reserve-restriction:{n.SellerUserId:N}:{n.ConsecutiveDeclineCount}:{n.OccurredAt:O}");
     public static Guid DepositId(AuctionDepositNotification n) => DeterministicGuid($"auction-deposit:{n.DepositId:N}:{n.DepositStatus}");
+    public static Guid SellerResultId(AuctionSellerResultNotification n) => DeterministicGuid($"auction-seller-result:{n.AuctionId:N}:{n.ResultId:N}:{n.Outcome}");
+    public static Guid PaymentTimeoutId(AuctionPaymentTimeoutNotification n) => DeterministicGuid($"auction-payment-timeout:{n.AuctionId:N}:{n.OrderId:N}:{n.WinnerUserId:N}");
+    public static Guid SellerPaymentTimeoutId(AuctionSellerPaymentTimeoutNotification n) => DeterministicGuid($"auction-seller-payment-timeout:{n.AuctionId:N}:{n.OrderId:N}:{n.WinnerUserId:N}");
 
     // ------------------------------------------------------------------ bodies
 
@@ -213,6 +219,62 @@ public static class NotificationPayloads
         depositStatus = n.DepositStatus,
         reason = Clip(n.Reason, 200),
         occurredAt = n.OccurredAt,
+        traceId = Clip(n.TraceId, 100)
+    };
+
+    public static object BuildSellerResult(AuctionSellerResultNotification n) => new
+    {
+        sourceEventId = SellerResultId(n),
+        auctionId = n.AuctionId,
+        resultId = n.ResultId,
+        sellerUserId = n.SellerUserId,
+        outcome = n.Outcome,
+        auctionTitle = CleanTitle(n.AuctionTitle),
+        decidedAt = n.DecidedAt,
+        winningBidId = n.WinningBidId,
+        winnerUserId = n.WinnerUserId,
+        orderId = n.OrderId,
+        winningAmount = n.WinningAmount,
+        currency = n.WinningAmount.HasValue ? "VND" : null,
+        paymentDeadline = n.PaymentDeadline,
+        traceId = Clip(n.TraceId, 100)
+    };
+
+    public static object BuildPaymentTimeout(AuctionPaymentTimeoutNotification n, string email, string? fullName) => new
+    {
+        sourceEventId = PaymentTimeoutId(n),
+        auctionId = n.AuctionId,
+        resultId = n.ResultId,
+        winningBidId = n.WinningBidId,
+        orderId = n.OrderId,
+        winnerUserId = n.WinnerUserId,
+        sellerUserId = n.SellerUserId,
+        winnerEmail = email,
+        winnerFullName = Clip(fullName, 200),
+        auctionTitle = CleanTitle(n.AuctionTitle),
+        orderStatus = "Cancelled",
+        auctionStatus = "Failed",
+        settledAt = n.SettledAt,
+        paymentDeadline = n.PaymentDeadline,
+        timedOutAt = n.TimedOutAt,
+        traceId = Clip(n.TraceId, 100)
+    };
+
+    public static object BuildSellerPaymentTimeout(AuctionSellerPaymentTimeoutNotification n) => new
+    {
+        sourceEventId = SellerPaymentTimeoutId(n),
+        auctionId = n.AuctionId,
+        resultId = n.ResultId,
+        winningBidId = n.WinningBidId,
+        orderId = n.OrderId,
+        winnerUserId = n.WinnerUserId,
+        sellerUserId = n.SellerUserId,
+        auctionTitle = CleanTitle(n.AuctionTitle),
+        orderStatus = "Cancelled",
+        auctionStatus = "Failed",
+        settledAt = n.SettledAt,
+        paymentDeadline = n.PaymentDeadline,
+        timedOutAt = n.TimedOutAt,
         traceId = Clip(n.TraceId, 100)
     };
 

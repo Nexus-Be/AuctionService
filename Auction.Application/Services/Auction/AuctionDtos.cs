@@ -61,7 +61,8 @@ public sealed record AuctionDetailDto(
     decimal? BuyNowPriceAmount = null,
     bool HasReservePrice = false,
     bool IsReserveMet = true,
-    bool BuyNowAvailable = false);
+    bool BuyNowAvailable = false,
+    string? LeadingBidderDisplayName = null);
 
 public sealed record AuctionStatusHistoryDto(
     Guid HistoryId,

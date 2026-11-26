@@ -137,6 +137,18 @@ public sealed class NotificationClient : INotificationClient
             NotificationPayloads.BuildReserveRestriction(notification), context: null);
     }
 
+    public void NotifyAuctionSellerResult(AuctionSellerResultNotification notification) =>
+        Add(NotificationPayloads.SellerResult, notification.AuctionId, NotificationPayloads.SellerResultId(notification),
+            NotificationPayloads.BuildSellerResult(notification), context: null);
+
+    public void NotifyAuctionPaymentTimeout(AuctionPaymentTimeoutNotification notification) =>
+        Add(NotificationPayloads.PaymentTimeout, notification.AuctionId, NotificationPayloads.PaymentTimeoutId(notification),
+            payload: null, context: notification);
+
+    public void NotifyAuctionSellerPaymentTimeout(AuctionSellerPaymentTimeoutNotification notification) =>
+        Add(NotificationPayloads.SellerPaymentTimeout, notification.AuctionId, NotificationPayloads.SellerPaymentTimeoutId(notification),
+            NotificationPayloads.BuildSellerPaymentTimeout(notification), context: null);
+
     private void Add(string kind, Guid auctionId, Guid eventId, object? payload, object? context)
     {
         if (!_options.Enabled)

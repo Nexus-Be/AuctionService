@@ -330,6 +330,9 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
         if (winnerNotice is not null)
         {
             _notifications.NotifyAuctionWinner(winnerNotice);
+            _notifications.NotifyAuctionSellerResult(new AuctionSellerResultNotification(
+                auctionId, winnerNotice.ResultId, auction.SellerId, "WinnerSelected", auction.SnapshotProductTitle,
+                now, winnerNotice.WinningBidId, winnerNotice.WinnerUserId, null, winnerNotice.WinningAmount, winnerNotice.PaymentDeadline));
         }
         else if (isBelowReserve && winningBid is not null && auction.ReservePriceAmount is { } reservePrice)
         {

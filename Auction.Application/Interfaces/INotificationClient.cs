@@ -46,7 +46,56 @@ public interface INotificationClient
 
     /// <summary>Warns the seller after the 2nd consecutive refusal, or restricts them from the 3rd one (including a timeout).</summary>
     void NotifyReserveRestriction(ReserveRestrictionNotification notification);
+
+    /// <summary>Tells the seller the outcome when an auction ends with a selected winner or without valid bids.</summary>
+    void NotifyAuctionSellerResult(AuctionSellerResultNotification notification);
+
+    /// <summary>Tells the buyer that their winning auction order timed out before payment was completed.</summary>
+    void NotifyAuctionPaymentTimeout(AuctionPaymentTimeoutNotification notification);
+
+    /// <summary>Tells the seller that the winning buyer did not pay within the 24-hour payment deadline.</summary>
+    void NotifyAuctionSellerPaymentTimeout(AuctionSellerPaymentTimeoutNotification notification);
 }
+
+public sealed record AuctionSellerResultNotification(
+    Guid AuctionId,
+    Guid ResultId,
+    Guid SellerUserId,
+    string Outcome,
+    string? AuctionTitle,
+    DateTimeOffset DecidedAt,
+    Guid? WinningBidId = null,
+    Guid? WinnerUserId = null,
+    Guid? OrderId = null,
+    decimal? WinningAmount = null,
+    DateTimeOffset? PaymentDeadline = null,
+    string? TraceId = null);
+
+public sealed record AuctionPaymentTimeoutNotification(
+    Guid AuctionId,
+    Guid ResultId,
+    Guid WinningBidId,
+    Guid OrderId,
+    Guid WinnerUserId,
+    Guid SellerUserId,
+    string? AuctionTitle,
+    DateTimeOffset SettledAt,
+    DateTimeOffset PaymentDeadline,
+    DateTimeOffset TimedOutAt,
+    string? TraceId = null);
+
+public sealed record AuctionSellerPaymentTimeoutNotification(
+    Guid AuctionId,
+    Guid ResultId,
+    Guid WinningBidId,
+    Guid OrderId,
+    Guid WinnerUserId,
+    Guid SellerUserId,
+    string? AuctionTitle,
+    DateTimeOffset SettledAt,
+    DateTimeOffset PaymentDeadline,
+    DateTimeOffset TimedOutAt,
+    string? TraceId = null);
 
 public sealed record ReserveApprovalNeededNotification(
     Guid AuctionId,

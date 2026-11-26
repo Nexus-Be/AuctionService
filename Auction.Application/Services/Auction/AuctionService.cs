@@ -1192,6 +1192,9 @@ public sealed class AuctionService : IAuctionService
         _notifications.NotifyAuctionWinner(new AuctionWinnerNotification(
             auctionId, auction.SnapshotProductTitle, result.Id, buyNowBid.Id,
             actor.UserId, auction.SellerId, buyNowPrice, now, paymentDeadline));
+        _notifications.NotifyAuctionSellerResult(new AuctionSellerResultNotification(
+            auctionId, result.Id, auction.SellerId, "WinnerSelected", auction.SnapshotProductTitle,
+            now, buyNowBid.Id, actor.UserId, null, buyNowPrice, paymentDeadline, actor.TraceId));
 
         try
         {
@@ -1278,6 +1281,9 @@ public sealed class AuctionService : IAuctionService
             _notifications.NotifyAuctionWinner(new AuctionWinnerNotification(
                 auctionId, auction.SnapshotProductTitle, res.Id, winBidId, winId,
                 auction.SellerId, res.FinalPriceAmount ?? 0m, now, paymentDeadline));
+            _notifications.NotifyAuctionSellerResult(new AuctionSellerResultNotification(
+                auctionId, res.Id, auction.SellerId, "WinnerSelected", auction.SnapshotProductTitle,
+                now, winBidId, winId, null, res.FinalPriceAmount ?? 0m, paymentDeadline, actor.TraceId));
         }
 
         await SaveAsync(null, cancellationToken);
@@ -1843,7 +1849,8 @@ public sealed class AuctionService : IAuctionService
         AuctionResultWinnerDto? winnerDto = null;
         if (result?.WinnerId is { } wId && canSeeWinnerAndSettlement)
         {
-            winnerDto = new AuctionResultWinnerDto(wId, null);
+            var winnerDisplayName = await TryGetMaskedNameAsync(wId, cancellationToken);
+            winnerDto = new AuctionResultWinnerDto(wId, winnerDisplayName);
         }
 
         AuctionResultSettlementDto? settlementDto = null;
@@ -2275,6 +2282,31 @@ public sealed class AuctionService : IAuctionService
                 auctionId, result.Id, paidBidId, orderId, winnerId, auction.SellerId,
                 auction.AuctionSettlement?.PaidAt ?? request.PaidAt ?? now, state.Status.ToString(),
                 request.OrderNo, request.TotalAmount, request.SellerRespondDeadlineAt, null));
+        }
+        else if (paymentStatus is SettlementPaymentStatus.Expired or SettlementPaymentStatus.PaymentTimedOut
+                 && result.WinningBidId is { } timedOutBidId)
+        {
+            var settledAt = result.DeterminedAt;
+            var paymentDeadline = auction.AuctionSettlement?.PaymentDeadlineAt ?? settledAt.Add(WinnerPaymentWindow);
+            _notifications.NotifyAuctionPaymentTimeout(new AuctionPaymentTimeoutNotification(
+                auctionId, result.Id, timedOutBidId, orderId, winnerId, auction.SellerId,
+                auction.SnapshotProductTitle, settledAt, paymentDeadline, now));
+            _notifications.NotifyAuctionSellerPaymentTimeout(new AuctionSellerPaymentTimeoutNotification(
+                auctionId, result.Id, timedOutBidId, orderId, winnerId, auction.SellerId,
+                auction.SnapshotProductTitle, settledAt, paymentDeadline, now));
+
+            if (offer is null && state.Status == AuctionStatus.Failed)
+            {
+                _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+                    auctionId, auction.SellerId, auction.SnapshotProductTitle,
+                    $"Commerce payment status: {paymentStatus}.", now, null));
+            }
+            else if (offer is not null)
+            {
+                _notifications.NotifyReplacementWinnerOffer(new ReplacementWinnerOfferNotification(
+                    auctionId, offer.Id, offer.BidId, offer.BidderId, winnerId, auction.SellerId,
+                    auction.SnapshotProductTitle, offer.Amount, offer.OfferedAt, offer.ExpiresAt, null));
+            }
         }
         else if (offer is null && state.Status == AuctionStatus.Failed)
         {
@@ -2716,6 +2748,8 @@ public sealed class AuctionService : IAuctionService
                 a.CreatedAt,
                 Status = a.AuctionState!.Status,
                 CurrentPriceAmount = a.AuctionState.CurrentPriceAmount,
+                CurrentWinnerId = a.AuctionState.CurrentWinnerId,
+                ResultWinnerId = a.AuctionResult != null && !a.AuctionResult.IsDeleted ? a.AuctionResult.WinnerId : (Guid?)null,
                 BidCount = a.AuctionState.BidCount,
                 ExtensionCount = a.AuctionState.ExtensionCount,
                 ScheduledEndAt = a.AuctionState.ScheduledEndAt,
@@ -2740,6 +2774,13 @@ public sealed class AuctionService : IAuctionService
         var buyNowAvailable = AuctionRules.IsBuyNowAvailable(
             row.Status, row.ReservePriceAmount, row.BuyNowPriceAmount, row.CurrentPriceAmount, row.BidCount);
 
+        var leaderOrWinnerId = row.Status is AuctionStatus.Ended or AuctionStatus.Settled
+            ? (row.ResultWinnerId ?? row.CurrentWinnerId)
+            : row.CurrentWinnerId;
+        var leadingBidderDisplayName = leaderOrWinnerId is { } lId
+            ? await TryGetMaskedNameAsync(lId, cancellationToken)
+            : null;
+
         return new AuctionDetailDto(
             row.Id, row.ProductId, row.SkuId, row.SellerId, row.SnapshotProductTitle ?? product?.Name,
             product?.Description, images.FirstOrDefault()?.Url, images, ParseSpecifications(product?.SpecificationsJson),
@@ -2750,7 +2791,8 @@ public sealed class AuctionService : IAuctionService
             row.BuyNowPriceAmount,
             HasReservePrice: row.ReservePriceAmount.HasValue,
             IsReserveMet: isReserveMet,
-            BuyNowAvailable: buyNowAvailable);
+            BuyNowAvailable: buyNowAvailable,
+            LeadingBidderDisplayName: leadingBidderDisplayName);
     }
 
     // ------------------------------------------------------------------ Commands

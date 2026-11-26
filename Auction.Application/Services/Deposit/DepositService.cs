@@ -1523,6 +1523,23 @@ public sealed class DepositService : IDepositService
         }
     }
 
+    private static string DescribeReleaseReason(string? code) => code switch
+    {
+        "RESERVE_NOT_MET" => "The seller did not accept the below-reserve bid; your deposit has been released.",
+        "AUCTION_ENDED_NOT_WINNER" => "The auction ended and another bidder won; your deposit has been released.",
+        "AUCTION_ENDED_BUY_NOW" => "The auction closed via Buy Now; your deposit has been released.",
+        "AUCTION_CANCELLED" => "The auction was cancelled by the seller; your deposit has been released.",
+        "ADMIN_FORCE_CANCEL" => "The auction was cancelled by an administrator; your deposit has been released.",
+        "SECOND_CHANCE_DECLINED" => "You declined the second-chance offer; your deposit has been released.",
+        "SECOND_CHANCE_EXPIRED" => "The second-chance offer expired; your deposit has been released.",
+        "SELLER_REJECTED" => "The seller rejected the order; your deposit has been refunded.",
+        "SELLER_ACCEPT_EXPIRED" => "The seller did not respond to the order in time; your deposit has been refunded.",
+        "AUCTION_SETTLED" => "The auction has settled; your runner-up deposit has been released.",
+        "AUCTION_FAILED" => "The auction did not complete; your deposit has been released.",
+        "ORDER_CANCELLED" => "The auction order was cancelled; your deposit has been released.",
+        _ => code ?? "DEPOSIT_RELEASED"
+    };
+
     private async Task QueueDepositNotificationAsync(
         AuctionDeposit deposit, string depositStatus, string? reason, DateTimeOffset occurredAt, string? traceId,
         CancellationToken cancellationToken)
@@ -1537,9 +1554,13 @@ public sealed class DepositService : IDepositService
                 .FirstOrDefaultAsync(cancellationToken);
         }
 
+        var friendlyReason = depositStatus is "Released" or "Refunded"
+            ? DescribeReleaseReason(reason)
+            : reason;
+
         _notifications.NotifyAuctionDeposit(new AuctionDepositNotification(
             deposit.AuctionId, title, deposit.Id, deposit.BidderId,
-            deposit.Amount, depositStatus, reason, occurredAt, traceId));
+            deposit.Amount, depositStatus, friendlyReason, occurredAt, traceId));
     }
 
     public static IReadOnlyList<HoldTransferInstruction> BuyNowGoodsCaptureTransfers(

@@ -291,6 +291,18 @@ public sealed class NotificationDispatcher : BackgroundService
                 return notice is null ? Fail("CONTEXT_INVALID") : await CompleteOrderPaidAsync(services, notice, cancellationToken);
             }
 
+            case NotificationPayloads.PaymentTimeout:
+            {
+                var notice = JsonSerializer.Deserialize<AuctionPaymentTimeoutNotification>(item.ContextJson, NotificationPayloads.Json);
+                if (notice is null)
+                    return Fail("CONTEXT_INVALID");
+
+                var contact = await ResolveWinnerContactAsync(notice.WinnerUserId, cancellationToken);
+                return contact is null
+                    ? Wait("WINNER_EMAIL_UNAVAILABLE")
+                    : Done(JsonSerializer.Serialize(NotificationPayloads.BuildPaymentTimeout(notice, contact.Email, contact.FullName), NotificationPayloads.Json));
+            }
+
             default:
                 return Fail("UNKNOWN_KIND_" + item.Kind);
         }
