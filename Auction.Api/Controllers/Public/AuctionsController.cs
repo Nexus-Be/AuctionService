@@ -324,6 +324,24 @@ public class AuctionsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Admin or Staff lists settled auctions for settlement tracking.</summary>
+    [HttpGet("~/api/v1/auction-settlements")]
+    [ProducesResponseType(typeof(PagedData<AuctionSettlementDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListAdminSettlements(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        [FromQuery] string? status = null,
+        [FromQuery] DateTimeOffset? determinedFrom = null,
+        CancellationToken ct = default)
+    {
+        if (!this.TryGetUserId(out _, out var errorResult)) return errorResult;
+        if (!this.HasRole("admin") && !this.HasRole("staff"))
+            return this.ForbiddenError("Only admin or staff accounts can access this resource.", "ROLE_NOT_ALLOWED");
+
+        var result = await _auctionService.ListSettlementsAsync(page, pageSize, status, determinedFrom, ct);
+        return Ok(result);
+    }
+
     /// <summary>Admin or Staff manually retries background Catalog/Commerce/User sync for a stuck auction.</summary>
     [HttpPost("~/api/v1/admin/auctions/{id:guid}/sync/retry")]
     [ProducesResponseType(typeof(AdminSyncRetryResponse), StatusCodes.Status200OK)]

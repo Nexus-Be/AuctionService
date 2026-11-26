@@ -30,6 +30,7 @@ services:
       Notification__BaseUrl: "http://nexus-notification-service:8007"
       Deposit__CallbackBaseUrl: "http://nexus-auction-service:8005"
       Deposit__AllowedReturnUrlHosts__0: "localhost"
+      AdminTimeControls__Enabled: "${ADMIN_TIME_CONTROLS_ENABLED:-true}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4317}"
     restart: unless-stopped
 
