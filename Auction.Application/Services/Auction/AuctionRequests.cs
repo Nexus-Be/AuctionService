@@ -30,6 +30,9 @@ public sealed record CancelAuctionRequest(string? Reason);
 /// <summary>Dữ liệu admin gửi khi huỷ cưỡng chế một phiên. Lý do là bắt buộc.</summary>
 public sealed record ForceCancelAuctionRequest(string? Reason);
 
+/// <summary>Dữ liệu admin/staff gửi khi từ chối duyệt một phiên đấu giá đang chờ duyệt. Lý do là bắt buộc.</summary>
+public sealed record RejectAuctionRequest(string? Reason);
+
 public sealed record RecreateAuctionRequest(
     decimal? StartPriceAmount,
     decimal? BidStepAmount,

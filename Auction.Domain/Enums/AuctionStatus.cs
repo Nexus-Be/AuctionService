@@ -8,5 +8,6 @@ public enum AuctionStatus
     Ended = 3,
     Settled = 4,
     Failed = 5,
-    Cancelled = 6
+    Cancelled = 6,
+    PendingApproval = 7
 }

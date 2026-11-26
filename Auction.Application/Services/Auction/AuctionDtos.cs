@@ -267,7 +267,8 @@ public sealed record AdminAuctionSummaryDto(
     bool HasAttentionDeposit,
     bool HasOverdueSettlement,
     bool NeedsAttention,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    string? PrimaryImageUrl = null);
 
 public sealed record MyWatchlistItemDto(
     Guid AuctionId,

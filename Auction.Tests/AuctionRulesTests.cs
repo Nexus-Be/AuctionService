@@ -97,4 +97,37 @@ public class AuctionRulesTests
         AuctionRules.MaxConsecutiveReserveDeclines.Should().Be(3);
         AuctionRules.ReserveRestrictionDays.Should().Be(14);
     }
+
+    [Theory]
+    [InlineData(1_000_000, 100_000, null, 1_000_000)]
+    [InlineData(0, 50_000, null, 50_000)]
+    [InlineData(1_000_000, 100_000, 1_000_000, 1_100_000)]
+    public void MinNextBid_FirstBidUsesStartPriceOrOneStepWhenStartIsZero(
+        int startPrice, int bidStep, int? currentPrice, int expected)
+    {
+        BidRules.MinNextBid(startPrice, bidStep, currentPrice).Should().Be(expected);
+    }
+
+    [Fact]
+    public void EnsureNotStarted_AllowsPendingApprovalAndScheduledBeforeStart()
+    {
+        var now = new DateTimeOffset(2026, 11, 20, 0, 0, 0, TimeSpan.Zero);
+        var futureStart = now.AddHours(1);
+
+        var pending = () => AuctionRules.EnsureNotStarted(AuctionStatus.PendingApproval, futureStart, now, "ERR", "msg", 409);
+        var scheduled = () => AuctionRules.EnsureNotStarted(AuctionStatus.Scheduled, futureStart, now, "ERR", "msg", 409);
+        var running = () => AuctionRules.EnsureNotStarted(AuctionStatus.Running, futureStart, now, "ERR", "msg", 409);
+
+        pending.Should().NotThrow();
+        scheduled.Should().NotThrow();
+        running.Should().Throw<BusinessRuleValidationException>();
+    }
+
+    [Fact]
+    public void EnsureBiddable_RejectsPendingApprovalAsNotRunning()
+    {
+        var now = new DateTimeOffset(2026, 11, 20, 0, 0, 0, TimeSpan.Zero);
+        var act = () => BidRules.EnsureBiddable(AuctionStatus.PendingApproval, now.AddHours(2), now);
+        act.Should().Throw<BusinessRuleValidationException>().Which.ErrorCode.Should().Be("AUCTION_NOT_RUNNING");
+    }
 }

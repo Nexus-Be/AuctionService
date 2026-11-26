@@ -12,7 +12,6 @@ public sealed class CatalogClient : ICatalogClient
 {
     private const string CheckStatusPath = "/api/v1/internal/variants/check-status";
     private const string VariantsPath = "/api/v1/internal/variants";
-    private const string ProductPath = "/api/v1/products/";
     private const string InternalProductPath = "/api/v1/internal/products/";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -73,7 +72,7 @@ public sealed class CatalogClient : ICatalogClient
     {
         try
         {
-            using var response = await _http.GetAsync(ProductPath + productId, cancellationToken);
+            using var response = await _http.GetAsync(InternalProductPath + productId, cancellationToken);
 
             if (response.StatusCode == HttpStatusCode.NotFound)
                 return null;
