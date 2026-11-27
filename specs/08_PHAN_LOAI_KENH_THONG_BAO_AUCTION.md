@@ -27,7 +27,7 @@ Trong code của `AuctionService` (`NotificationDispatcher.cs`), có **2 sự ki
 
 ## 3. Nhóm chỉ hiển thị trên Chuông thông báo giao diện hệ thống (In-App Notification)
 
-Nhóm này gồm **12 sự kiện**. `AuctionService` chỉ truyền `UserId` của người nhận (`sellerUserId`, `bidderUserId`, `watcherUserIds`...) mà không cần tra cứu địa chỉ Email. Khi người dùng đăng nhập vào web và bấm vào biểu tượng cái chuông ở góc trên bên phải, các thông báo này sẽ xuất hiện trong danh sách:
+Nhóm này gồm **13 sự kiện**. `AuctionService` chỉ truyền `UserId` của người nhận (`sellerUserId`, `bidderUserId`, `watcherUserIds`...) mà không cần tra cứu địa chỉ Email. Khi người dùng đăng nhập vào web và bấm vào biểu tượng cái chuông ở góc trên bên phải, các thông báo này sẽ xuất hiện trong danh sách:
 
 ### A. Dành cho Người mua (Buyer)
 1. **Bị người khác vượt giá (`auction-outbids`):**
@@ -35,7 +35,7 @@ Nhóm này gồm **12 sự kiện**. `AuctionService` chỉ truyền `UserId` c�
 2. **Phiên đang theo dõi có lượt đặt giá mới (`auction-watchlist-bids`):**
    - Gửi cho danh sách những người đã bấm nút *"Theo dõi phiên"* (và có bật nhận thông báo) khi phiên đó có mức giá mới.
 3. **Nhận lời mời mua lại cho Người về nhì (`auction-winner-offers`):**
-   - Khi người thắng Hạng 1 bỏ cọc / không thanh toán, hệ thống gửi thông báo cho người xếp Hạng 2 biết họ có 24 giờ để vào mục *Lời mời đấu giá* chọn Đồng ý mua (với mức giá của chính họ) hoặc Từ chối.
+   - Khi người thắng Hạng 1 bỏ cọc / không thanh toán, hệ thống gửi thông báo cho người xếp Hạng 2 biết họ có 24 giờ để vào mục *Lời mời đấu giá* chọn Đồng ý mua (với mức giá của chính họ) hoặc Từ chối. *(Khi người về nhì bấm Đồng ý nhận lời mời, hệ thống cũng bắn luôn thông báo thắng phiên `auction-winners` kèm hạn thanh toán 24h mới).*
 4. **Biến động trạng thái tiền cọc (`auction-deposits`):**
    - Báo cho người mua mỗi khi khoản cọc của họ đổi trạng thái:
      - `Authorized`: Đã khóa cọc thành công, đủ điều kiện đặt giá.
@@ -46,19 +46,25 @@ Nhóm này gồm **12 sự kiện**. `AuctionService` chỉ truyền `UserId` c�
    - Gửi cho những người mua đã bấm *"Báo cáo phiên"* khi Admin/Staff xử lý xong (cảm ơn vì đã báo cáo khi Admin hủy cưỡng chế phiên gian lận, hoặc thông báo bác bỏ báo cáo kèm ghi chú của Admin).
 
 ### B. Dành cho Người bán (Seller)
-6. **Kết quả phiên đấu giá khi có người thắng (`auction-seller-results`):**
-   - Báo cho người bán ngay khi phiên kết thúc và đã xác định được người thắng cuộc, kèm mức giá chốt và hạn thanh toán của người mua.
-7. **Người mua đã thanh toán đơn hàng đấu giá (`auction-order-payments`):**
+6. **Phiên đấu giá đã gửi chờ duyệt (`in-app` — `NotifyAuctionSubmitted`):**
+   - Báo cho người bán ngay khi họ tạo phiên mới (`CreateAsync`) hoặc tạo lại phiên từ phiên thất bại (`RecreateAsync`): xác nhận phiên đã tạo thành công ở trạng thái `PendingApproval` và đang chờ nhân viên sàn phê duyệt.
+7. **Phiên đấu giá đã được duyệt (`in-app` — `NotifyAuctionApproved`):**
+   - Báo cho người bán ngay khi Staff/Admin bấm **Duyệt** (`ApproveAuctionAsync`): thông báo phiên đã được phê duyệt sang `Scheduled` và sẽ tự động mở bán vào đúng giờ hẹn.
+8. **Phiên đấu giá bắt đầu mở bán (`auction-starts` — `NotifyAuctionStarted`):**
+   - Báo cho người bán ngay khi đồng hồ chạm giờ bắt đầu và phiên tự động chuyển từ `Scheduled` sang **`Running`** (`StartAuctionAsync`).
+9. **Kết quả phiên đấu giá khi có người thắng (`auction-seller-results`):**
+   - Báo cho người bán ngay khi phiên kết thúc và đã xác định được người thắng cuộc (hoặc khi người về nhì đồng ý nhận lời mời mua lại), kèm mức giá chốt và hạn thanh toán của người mua.
+10. **Người mua đã thanh toán đơn hàng đấu giá (`auction-order-payments`):**
    - Báo cho người bán (và xác nhận cho người mua) khi đơn hàng đấu giá đã được trả tiền xong (`Paid`), nhắc người bán vào tiếp nhận đơn và giao hàng trước hạn `sellerAcceptDeadline`.
-8. **Yêu cầu duyệt bán dưới giá sàn trong 12 giờ (`auction-reserve-approval-needed`):**
+11. **Yêu cầu duyệt bán dưới giá sàn trong 12 giờ (`auction-reserve-approval-needed`):**
    - Khi phiên hết giờ mà giá cao nhất vẫn thấp hơn mức Giá sàn bí mật (`ReservePrice`), hệ thống báo cho người bán biết mức giá cao nhất hiện tại và nhắc họ vào bấm *Đồng ý bán* hoặc *Từ chối* trong vòng 12 giờ.
-9. **Cảnh báo / Khóa quyền đặt Giá sàn (`auction-reserve-restriction`):**
+12. **Cảnh báo / Khóa quyền đặt Giá sàn (`auction-reserve-restriction`):**
    - Gửi cho người bán khi họ từ chối (hoặc để quá hạn 12 giờ không duyệt) bán dưới giá sàn từ **lần thứ 2 liên tiếp** (gửi cảnh báo) và **lần thứ 3 liên tiếp** (báo khóa quyền đặt giá sàn trong 14 ngày).
-10. **Người thắng quá hạn không thanh toán đơn (`auction-seller-payment-timeouts`):**
+13. **Người thắng quá hạn không thanh toán đơn (`auction-seller-payment-timeouts`):**
     - Báo cho người bán biết người thắng đã không thanh toán trong 24 giờ nên đơn hàng của người đó đã hủy (để chuyển sang mời người về nhì hoặc đóng phiên).
-11. **Phiên đấu giá thất bại (`auction-failed`):**
+14. **Phiên đấu giá thất bại (`auction-failed`):**
     - Báo cho người bán khi phiên khép lại ở trạng thái `Failed` (hết giờ không có ai đặt giá, người bán từ chối bán dưới giá sàn, người mua không thanh toán và không có người về nhì nhận lời mời, hoặc đơn hàng bị hủy sau thanh toán).
-12. **Phiên đấu giá bị hủy (`auction-cancelled`):**
+15. **Phiên đấu giá bị hủy (`auction-cancelled`):**
     - Báo cho người bán khi phiên bị hủy trước khi kết thúc: bao gồm lúc Seller tự hủy, lúc **Staff/Admin từ chối duyệt phiên (`Reject`)**, hoặc lúc **Admin cưỡng chế hủy phiên (`Force Cancel`)** kèm theo lý do cụ thể.
 
 ---

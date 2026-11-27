@@ -2866,6 +2866,10 @@ public sealed class AuctionService : IAuctionService
             newValues: Snapshot(created.Auction, AuctionStatus.PendingApproval),
             userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
 
+        _notifications.NotifyAuctionSubmitted(new AuctionSubmittedNotification(
+            created.Auction.Id, actor.UserId, created.Auction.SnapshotProductTitle,
+            created.Auction.ScheduledStartAt, now, actor.TraceId));
+
         // Giữ sản phẩm ở Catalog (InAuction) và tạo phiên cùng thành công hoặc cùng thất bại: khoá trước, lưu phiên sau.
         await _catalog.LockProductForAuctionAsync(productId, cancellationToken);
         try
@@ -3102,6 +3106,10 @@ public sealed class AuctionService : IAuctionService
             newValues: new { status = AuctionStatus.Scheduled.ToString() },
             changedColumns: new[] { "status" },
             userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+
+        _notifications.NotifyAuctionApproved(new AuctionApprovedNotification(
+            auction.Id, auction.SellerId, auction.SnapshotProductTitle,
+            auction.ScheduledStartAt, now, actor.TraceId));
 
         await SaveAsync(null, cancellationToken);
 
@@ -3446,6 +3454,13 @@ public sealed class AuctionService : IAuctionService
             },
             userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
 
+        _notifications.NotifyAuctionWinner(new AuctionWinnerNotification(
+            auctionId, auction.SnapshotProductTitle, result.Id, offer.BidId,
+            offer.BidderId, auction.SellerId, offer.Amount, now, paymentDeadline));
+        _notifications.NotifyAuctionSellerResult(new AuctionSellerResultNotification(
+            auctionId, result.Id, auction.SellerId, "WinnerSelected", auction.SnapshotProductTitle,
+            now, offer.BidId, offer.BidderId, null, offer.Amount, paymentDeadline, actor.TraceId));
+
         await SaveAsync(null, cancellationToken);
 
         // Người thắng mới đã nhận lời mời: đẩy settlement mới sang Commerce để tạo đơn (gửi nền, có thử lại).
@@ -3699,6 +3714,13 @@ public sealed class AuctionService : IAuctionService
                 paymentDeadlineAt = paymentDeadline
             },
             userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+
+        _notifications.NotifyAuctionWinner(new AuctionWinnerNotification(
+            auctionId, auction.SnapshotProductTitle, result.Id, offer.BidId,
+            offer.BidderId, auction.SellerId, offer.Amount, now, paymentDeadline));
+        _notifications.NotifyAuctionSellerResult(new AuctionSellerResultNotification(
+            auctionId, result.Id, auction.SellerId, "WinnerSelected", auction.SnapshotProductTitle,
+            now, offer.BidId, offer.BidderId, null, offer.Amount, paymentDeadline, actor.TraceId));
 
         await SaveAsync(null, cancellationToken);
 
@@ -4006,6 +4028,10 @@ public sealed class AuctionService : IAuctionService
             AuditAction.AuctionCreate, "Auction", created.Auction.Id.ToString(),
             newValues: Snapshot(created.Auction, AuctionStatus.PendingApproval),
             userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+
+        _notifications.NotifyAuctionSubmitted(new AuctionSubmittedNotification(
+            created.Auction.Id, actor.UserId, created.Auction.SnapshotProductTitle,
+            created.Auction.ScheduledStartAt, now, actor.TraceId));
 
         // Giữ sản phẩm ở Catalog (InAuction) và tạo phiên cùng thành công hoặc cùng thất bại: khoá trước, lưu phiên sau.
         await _catalog.LockProductForAuctionAsync(source.ProductId, cancellationToken);
