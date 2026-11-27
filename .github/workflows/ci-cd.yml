@@ -2,9 +2,9 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: ["main"]
+    branches: ["dev"]
   pull_request:
-    branches: ["main"]
+    branches: ["dev"]
 
 jobs:
   build-and-push:
@@ -46,7 +46,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-<<<<<<< HEAD
   deploy-render:
     name: Trigger Render Deploy
     needs: build-and-push
@@ -55,22 +54,11 @@ jobs:
 
     steps:
       - name: Trigger Render Deploy Webhook
-=======
-      - name: Trigger Render Deploy
-        if: github.event_name != 'pull_request'
->>>>>>> 47612106d9cfa78b53dc49688adef41f0cf42858
         env:
           RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
         run: |
           if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
-<<<<<<< HEAD
             echo "::error::Missing RENDER_DEPLOY_HOOK_URL repository secret."
             exit 1
           fi
           curl -fsS --retry 3 --retry-delay 5 --max-time 30 -X POST "$RENDER_DEPLOY_HOOK_URL"
-=======
-            echo "RENDER_DEPLOY_HOOK_URL secret is not set" >&2
-            exit 1
-          fi
-          curl -fsS "$RENDER_DEPLOY_HOOK_URL"
->>>>>>> 47612106d9cfa78b53dc49688adef41f0cf42858
