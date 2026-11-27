@@ -50,8 +50,14 @@ public interface IAuctionService
     /// <summary>Lấy chi tiết một phiên đấu giá.</summary>
     Task<AuctionDetailDto> GetByIdAsync(Guid id, CancellationToken cancellationToken = default);
 
-    /// <summary>Seller tạo phiên đấu giá mới, trạng thái ban đầu là Scheduled.</summary>
+    /// <summary>Seller tạo phiên đấu giá mới, trạng thái ban đầu là PendingApproval (chờ Admin/Staff duyệt).</summary>
     Task<AuctionCreatedResponse> CreateAsync(ActorContext actor, CreateAuctionRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>Admin/Staff duyệt phiên đấu giá đang PendingApproval sang Scheduled để tự động chạy khi tới giờ.</summary>
+    Task<AuctionApprovalResponse> ApproveAuctionAsync(ActorContext actor, Guid auctionId, CancellationToken cancellationToken = default);
+
+    /// <summary>Admin/Staff từ chối phiên đấu giá đang PendingApproval (bắt buộc có lý do) và mở khoá sản phẩm ở Catalog.</summary>
+    Task<AuctionApprovalResponse> RejectAuctionAsync(ActorContext actor, Guid auctionId, RejectAuctionRequest request, CancellationToken cancellationToken = default);
 
     /// <summary>Seller sửa phiên của mình trước khi phiên bắt đầu.</summary>
     Task<AuctionUpdatedResponse> UpdateAsync(ActorContext actor, Guid auctionId, UpdateAuctionRequest request, CancellationToken cancellationToken = default);

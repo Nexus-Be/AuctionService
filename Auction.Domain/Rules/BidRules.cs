@@ -50,6 +50,7 @@ public static class BidRules
         switch (status)
         {
             case AuctionStatus.Draft:
+            case AuctionStatus.PendingApproval:
             case AuctionStatus.Scheduled:
                 throw new BusinessRuleValidationException("AUCTION_NOT_RUNNING", "The auction has not started yet.", 422);
 
@@ -63,9 +64,14 @@ public static class BidRules
         }
     }
 
-    /// <summary>The first bid must reach the start price. Later bids must add at least one bid step.</summary>
+    /// <summary>
+    /// The first bid must reach the start price (or at least one bid step when the start price is 0).
+    /// Later bids must add at least one bid step.
+    /// </summary>
     public static decimal MinNextBid(decimal startPriceAmount, decimal bidStepAmount, decimal? currentPriceAmount) =>
-        currentPriceAmount is null ? startPriceAmount : currentPriceAmount.Value + bidStepAmount;
+        currentPriceAmount is null
+            ? (startPriceAmount > 0m ? startPriceAmount : bidStepAmount)
+            : currentPriceAmount.Value + bidStepAmount;
 
     public static void EnsureMeetsMinimum(decimal amount, decimal minNextBidAmount)
     {

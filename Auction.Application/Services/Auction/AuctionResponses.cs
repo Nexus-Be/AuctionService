@@ -39,6 +39,13 @@ public sealed record AuctionCancelledResponse(
     int DepositsToRelease,
     string StockRelease);
 
+public sealed record AuctionApprovalResponse(
+    Guid AuctionId,
+    AuctionStatus FromStatus,
+    AuctionStatus Status,
+    string? Reason,
+    DateTimeOffset ReviewedAt);
+
 public sealed record AuctionRecreatedResponse(
     Guid AuctionId,
     Guid RecreatedFromAuctionId,

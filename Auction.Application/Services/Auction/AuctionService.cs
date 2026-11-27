@@ -61,15 +61,15 @@ public sealed class AuctionService : IAuctionService
 
     // ------------------------------------------------------------------ Queries
 
-    /// <summary>Lấy danh sách phiên đấu giá có phân trang, tìm kiếm, lọc và sắp xếp. Dùng cho trang danh sách công khai.</summary>
+    /// <summary>Lấy danh sách phiên đấu giá có phân trang, tìm kiếm, lọc và sắp xếp. Dùng cho trang danh sách công khai (luôn ẩn phiên chờ duyệt).</summary>
     public Task<PagedData<AuctionSummaryDto>> ListActiveAuctionsAsync(
         int page = 1, int pageSize = 20, AuctionListFilter? filter = null, CancellationToken cancellationToken = default)
-        => ListAuctionsAsync(page, pageSize, filter ?? new AuctionListFilter(), cancellationToken);
+        => ListAuctionsAsync(page, pageSize, filter ?? new AuctionListFilter(), excludePendingApproval: true, cancellationToken);
 
     /// <summary>Lấy danh sách phiên của riêng một seller (có phân trang, lọc theo trạng thái). Dùng cho trang quản lý của seller.</summary>
     public Task<PagedData<AuctionSummaryDto>> ListSellerAuctionsAsync(
         Guid sellerId, int page = 1, int pageSize = 20, string? status = null, CancellationToken cancellationToken = default)
-        => ListAuctionsAsync(page, pageSize, new AuctionListFilter(Status: status, SellerId: sellerId), cancellationToken);
+        => ListAuctionsAsync(page, pageSize, new AuctionListFilter(Status: status, SellerId: sellerId), excludePendingApproval: false, cancellationToken);
 
     /// <summary>Giá khởi điểm, giá sàn và giá mua ngay của chính phiên của seller. Chỉ seller sở hữu được xem (người khác nhận 403 FORBIDDEN).</summary>
     public async Task<SellerAuctionPricingDto> GetSellerAuctionPricingAsync(
@@ -269,31 +269,12 @@ public sealed class AuctionService : IAuctionService
 
         var totalCount = await query.CountAsync(cancellationToken);
 
-        var items = await query
-            .OrderByDescending(a => a.CreatedAt)
-            .ThenBy(a => a.Id)
-            .Skip((safePage - 1) * safePageSize)
-            .Take(safePageSize)
-            .Select(a => new AdminAuctionSummaryDto(
-                a.Id,
-                a.ProductId,
-                a.SkuId,
-                a.SellerId,
-                a.SnapshotProductTitle,
-                a.AuctionState!.Status,
-                a.StartPriceAmount,
-                a.AuctionState.CurrentPriceAmount,
-                a.AuctionState.BidCount,
-                a.ScheduledStartAt,
-                a.AuctionState.ScheduledEndAt,
-                _dbContext.AuctionDeposits.Any(d => d.AuctionId == a.Id && !d.IsDeleted && (d.NeedsAttention || d.ActionFailureCount > 10)),
-                a.AuctionState.Status == AuctionStatus.Ended
-                    && a.AuctionSettlement != null
-                    && a.AuctionSettlement.Status == AuctionSettlementStatus.PendingPayment
-                    && a.AuctionSettlement.PaymentDeadlineAt <= now,
-                a.NeedsAttention,
-                a.CreatedAt))
-            .ToListAsync(cancellationToken);
+        var items = await ProjectAdminAuctionSummariesAsync(
+            query.OrderByDescending(a => a.CreatedAt).ThenBy(a => a.Id),
+            safePage,
+            safePageSize,
+            now,
+            cancellationToken);
 
         return new PagedData<AdminAuctionSummaryDto>(items, PaginationMetadata.Create(safePage, safePageSize, totalCount));
     }
@@ -317,33 +298,72 @@ public sealed class AuctionService : IAuctionService
 
         var totalCount = await query.CountAsync(cancellationToken);
 
-        var items = await query
-            .OrderByDescending(a => a.UpdatedAt)
-            .ThenBy(a => a.Id)
+        var items = await ProjectAdminAuctionSummariesAsync(
+            query.OrderByDescending(a => a.UpdatedAt).ThenBy(a => a.Id),
+            safePage,
+            safePageSize,
+            now,
+            cancellationToken);
+
+        return new PagedData<AdminAuctionSummaryDto>(items, PaginationMetadata.Create(safePage, safePageSize, totalCount));
+    }
+
+    private async Task<List<AdminAuctionSummaryDto>> ProjectAdminAuctionSummariesAsync(
+        IOrderedQueryable<Domain.Entities.Auction> orderedQuery,
+        int safePage,
+        int safePageSize,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var rows = await orderedQuery
             .Skip((safePage - 1) * safePageSize)
             .Take(safePageSize)
-            .Select(a => new AdminAuctionSummaryDto(
+            .Select(a => new
+            {
                 a.Id,
                 a.ProductId,
                 a.SkuId,
                 a.SellerId,
                 a.SnapshotProductTitle,
-                a.AuctionState!.Status,
+                Status = a.AuctionState!.Status,
                 a.StartPriceAmount,
                 a.AuctionState.CurrentPriceAmount,
                 a.AuctionState.BidCount,
                 a.ScheduledStartAt,
                 a.AuctionState.ScheduledEndAt,
-                _dbContext.AuctionDeposits.Any(d => d.AuctionId == a.Id && !d.IsDeleted && (d.NeedsAttention || d.ActionFailureCount > 10)),
-                a.AuctionState.Status == AuctionStatus.Ended
+                HasAttentionDeposit = _dbContext.AuctionDeposits.Any(d => d.AuctionId == a.Id && !d.IsDeleted && (d.NeedsAttention || d.ActionFailureCount > 10)),
+                HasOverdueSettlement = a.AuctionState.Status == AuctionStatus.Ended
                     && a.AuctionSettlement != null
                     && a.AuctionSettlement.Status == AuctionSettlementStatus.PendingPayment
                     && a.AuctionSettlement.PaymentDeadlineAt <= now,
                 a.NeedsAttention,
-                a.CreatedAt))
+                a.CreatedAt
+            })
             .ToListAsync(cancellationToken);
 
-        return new PagedData<AdminAuctionSummaryDto>(items, PaginationMetadata.Create(safePage, safePageSize, totalCount));
+        var images = await TryGetMainImagesAsync(
+            rows.Where(r => r.SkuId.HasValue).Select(r => r.SkuId!.Value).Distinct().ToList(),
+            cancellationToken);
+
+        return rows
+            .Select(r => new AdminAuctionSummaryDto(
+                r.Id,
+                r.ProductId,
+                r.SkuId,
+                r.SellerId,
+                r.SnapshotProductTitle,
+                r.Status,
+                r.StartPriceAmount,
+                r.CurrentPriceAmount,
+                r.BidCount,
+                r.ScheduledStartAt,
+                r.ScheduledEndAt,
+                r.HasAttentionDeposit,
+                r.HasOverdueSettlement,
+                r.NeedsAttention,
+                r.CreatedAt,
+                r.SkuId is { } skuId && images.TryGetValue(skuId, out var imageUrl) ? imageUrl : null))
+            .ToList();
     }
 
     /// <summary>Admin/Staff kích hoạt chạy lại đồng bộ Catalog / Commerce / User cho một phiên bị kẹt.</summary>
@@ -1192,6 +1212,9 @@ public sealed class AuctionService : IAuctionService
         _notifications.NotifyAuctionWinner(new AuctionWinnerNotification(
             auctionId, auction.SnapshotProductTitle, result.Id, buyNowBid.Id,
             actor.UserId, auction.SellerId, buyNowPrice, now, paymentDeadline));
+        _notifications.NotifyAuctionSellerResult(new AuctionSellerResultNotification(
+            auctionId, result.Id, auction.SellerId, "WinnerSelected", auction.SnapshotProductTitle,
+            now, buyNowBid.Id, actor.UserId, null, buyNowPrice, paymentDeadline, actor.TraceId));
 
         try
         {
@@ -1278,6 +1301,9 @@ public sealed class AuctionService : IAuctionService
             _notifications.NotifyAuctionWinner(new AuctionWinnerNotification(
                 auctionId, auction.SnapshotProductTitle, res.Id, winBidId, winId,
                 auction.SellerId, res.FinalPriceAmount ?? 0m, now, paymentDeadline));
+            _notifications.NotifyAuctionSellerResult(new AuctionSellerResultNotification(
+                auctionId, res.Id, auction.SellerId, "WinnerSelected", auction.SnapshotProductTitle,
+                now, winBidId, winId, null, res.FinalPriceAmount ?? 0m, paymentDeadline, actor.TraceId));
         }
 
         await SaveAsync(null, cancellationToken);
@@ -1843,7 +1869,8 @@ public sealed class AuctionService : IAuctionService
         AuctionResultWinnerDto? winnerDto = null;
         if (result?.WinnerId is { } wId && canSeeWinnerAndSettlement)
         {
-            winnerDto = new AuctionResultWinnerDto(wId, null);
+            var winnerDisplayName = await TryGetMaskedNameAsync(wId, cancellationToken);
+            winnerDto = new AuctionResultWinnerDto(wId, winnerDisplayName);
         }
 
         AuctionResultSettlementDto? settlementDto = null;
@@ -2276,6 +2303,31 @@ public sealed class AuctionService : IAuctionService
                 auction.AuctionSettlement?.PaidAt ?? request.PaidAt ?? now, state.Status.ToString(),
                 request.OrderNo, request.TotalAmount, request.SellerRespondDeadlineAt, null));
         }
+        else if (paymentStatus is SettlementPaymentStatus.Expired or SettlementPaymentStatus.PaymentTimedOut
+                 && result.WinningBidId is { } timedOutBidId)
+        {
+            var settledAt = result.DeterminedAt;
+            var paymentDeadline = auction.AuctionSettlement?.PaymentDeadlineAt ?? settledAt.Add(WinnerPaymentWindow);
+            _notifications.NotifyAuctionPaymentTimeout(new AuctionPaymentTimeoutNotification(
+                auctionId, result.Id, timedOutBidId, orderId, winnerId, auction.SellerId,
+                auction.SnapshotProductTitle, settledAt, paymentDeadline, now));
+            _notifications.NotifyAuctionSellerPaymentTimeout(new AuctionSellerPaymentTimeoutNotification(
+                auctionId, result.Id, timedOutBidId, orderId, winnerId, auction.SellerId,
+                auction.SnapshotProductTitle, settledAt, paymentDeadline, now));
+
+            if (offer is null && state.Status == AuctionStatus.Failed)
+            {
+                _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+                    auctionId, auction.SellerId, auction.SnapshotProductTitle,
+                    $"Commerce payment status: {paymentStatus}.", now, null));
+            }
+            else if (offer is not null)
+            {
+                _notifications.NotifyReplacementWinnerOffer(new ReplacementWinnerOfferNotification(
+                    auctionId, offer.Id, offer.BidId, offer.BidderId, winnerId, auction.SellerId,
+                    auction.SnapshotProductTitle, offer.Amount, offer.OfferedAt, offer.ExpiresAt, null));
+            }
+        }
         else if (offer is null && state.Status == AuctionStatus.Failed)
         {
             _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
@@ -2589,7 +2641,7 @@ public sealed class AuctionService : IAuctionService
     /// rồi lấy ảnh chính từ Catalog. Catalog lỗi chỉ làm thiếu ảnh, không làm hỏng danh sách.
     /// </summary>
     private async Task<PagedData<AuctionSummaryDto>> ListAuctionsAsync(
-        int page, int pageSize, AuctionListFilter listFilter, CancellationToken cancellationToken)
+        int page, int pageSize, AuctionListFilter listFilter, bool excludePendingApproval, CancellationToken cancellationToken)
     {
         var (safePage, safePageSize) = PaginationConstants.Normalize(page, pageSize);
         var statusFilter = ParseStatus(listFilter.Status);
@@ -2610,6 +2662,9 @@ public sealed class AuctionService : IAuctionService
 
         if (listFilter.ProductId is { } productId && productId != Guid.Empty)
             query = query.Where(a => a.ProductId == productId);
+
+        if (excludePendingApproval)
+            query = query.Where(a => a.AuctionState!.Status != AuctionStatus.PendingApproval);
 
         if (statusFilter is { } filter)
             query = query.Where(a => a.AuctionState!.Status == filter);
@@ -2716,6 +2771,8 @@ public sealed class AuctionService : IAuctionService
                 a.CreatedAt,
                 Status = a.AuctionState!.Status,
                 CurrentPriceAmount = a.AuctionState.CurrentPriceAmount,
+                CurrentWinnerId = a.AuctionState.CurrentWinnerId,
+                ResultWinnerId = a.AuctionResult != null && !a.AuctionResult.IsDeleted ? a.AuctionResult.WinnerId : (Guid?)null,
                 BidCount = a.AuctionState.BidCount,
                 ExtensionCount = a.AuctionState.ExtensionCount,
                 ScheduledEndAt = a.AuctionState.ScheduledEndAt,
@@ -2740,6 +2797,13 @@ public sealed class AuctionService : IAuctionService
         var buyNowAvailable = AuctionRules.IsBuyNowAvailable(
             row.Status, row.ReservePriceAmount, row.BuyNowPriceAmount, row.CurrentPriceAmount, row.BidCount);
 
+        var leaderOrWinnerId = row.Status is AuctionStatus.Ended or AuctionStatus.Settled
+            ? (row.ResultWinnerId ?? row.CurrentWinnerId)
+            : row.CurrentWinnerId;
+        var leadingBidderDisplayName = leaderOrWinnerId is { } lId
+            ? await TryGetMaskedNameAsync(lId, cancellationToken)
+            : null;
+
         return new AuctionDetailDto(
             row.Id, row.ProductId, row.SkuId, row.SellerId, row.SnapshotProductTitle ?? product?.Name,
             product?.Description, images.FirstOrDefault()?.Url, images, ParseSpecifications(product?.SpecificationsJson),
@@ -2750,7 +2814,8 @@ public sealed class AuctionService : IAuctionService
             row.BuyNowPriceAmount,
             HasReservePrice: row.ReservePriceAmount.HasValue,
             IsReserveMet: isReserveMet,
-            BuyNowAvailable: buyNowAvailable);
+            BuyNowAvailable: buyNowAvailable,
+            LeadingBidderDisplayName: leadingBidderDisplayName);
     }
 
     // ------------------------------------------------------------------ Commands
@@ -2798,7 +2863,7 @@ public sealed class AuctionService : IAuctionService
         _dbContext.AuctionStatusHistories.Add(created.History);
         _dbContext.AddAuditLog(
             AuditAction.AuctionCreate, "Auction", created.Auction.Id.ToString(),
-            newValues: Snapshot(created.Auction, AuctionStatus.Scheduled),
+            newValues: Snapshot(created.Auction, AuctionStatus.PendingApproval),
             userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
 
         // Giữ sản phẩm ở Catalog (InAuction) và tạo phiên cùng thành công hoặc cùng thất bại: khoá trước, lưu phiên sau.
@@ -2816,7 +2881,7 @@ public sealed class AuctionService : IAuctionService
 
         var a = created.Auction;
         return new AuctionCreatedResponse(
-            a.Id, a.ProductId, a.SkuId, a.SnapshotProductTitle, AuctionStatus.Scheduled,
+            a.Id, a.ProductId, a.SkuId, a.SnapshotProductTitle, AuctionStatus.PendingApproval,
             a.StartPriceAmount, a.BidStepAmount, a.ScheduledStartAt, a.OriginalEndAt,
             a.AntiSnipingExtensionMinutes, a.MaxExtensionCount, a.CreatedAt,
             a.ReservePriceAmount, a.BuyNowPriceAmount);
@@ -2924,9 +2989,9 @@ public sealed class AuctionService : IAuctionService
         if (state.BidCount > 0)
             throw new DomainException("AUCTION_HAS_BIDS", "A seller cannot cancel an auction that already has bids.", 409);
 
-        if (state.Status is not (AuctionStatus.Scheduled or AuctionStatus.Running))
+        if (state.Status is not (AuctionStatus.PendingApproval or AuctionStatus.Scheduled or AuctionStatus.Running))
             throw new BusinessRuleValidationException(
-                "INVALID_STATE_TRANSITION", "Auction can only be cancelled when it is scheduled or running without bids.", 422);
+                "INVALID_STATE_TRANSITION", "Auction can only be cancelled when it is pending approval, scheduled or running without bids.", 422);
 
         var fromStatus = state.Status;
         var oldValues = Snapshot(auction, fromStatus);
@@ -2987,7 +3052,140 @@ public sealed class AuctionService : IAuctionService
     }
 
     /// <summary>
-    /// Admin huỷ cưỡng chế phiên chưa kết thúc (Draft, Scheduled, Running), kể cả phiên đã có người đặt giá (API 24). Bắt buộc có lý do.
+    /// Admin/Staff duyệt phiên đấu giá đang PendingApproval sang Scheduled để tự động chạy khi tới giờ bắt đầu.
+    /// Nếu thời điểm bắt đầu dự kiến đã qua thì từ chối duyệt (409) để Seller chỉnh lại lịch trước.
+    /// </summary>
+    public async Task<AuctionApprovalResponse> ApproveAuctionAsync(
+        ActorContext actor, Guid auctionId, CancellationToken cancellationToken = default)
+    {
+        if (auctionId == Guid.Empty)
+            throw Invalid("VAL_INVALID_IDENTIFIER", "Auction ID is required.");
+
+        var now = _clock.GetUtcNow();
+        var auction = await LoadForWriteAsync(auctionId, cancellationToken);
+        var state = auction.AuctionState!;
+
+        if (state.Status != AuctionStatus.PendingApproval)
+            throw new BusinessRuleValidationException(
+                "AUCTION_NOT_PENDING_APPROVAL", "Only an auction in PendingApproval status can be approved.", 409);
+
+        if (auction.ScheduledStartAt <= now)
+            throw new DomainException(
+                "AUCTION_START_TIME_PASSED",
+                "Scheduled start time has already passed. Ask the seller to update the schedule before approving.",
+                409);
+
+        var fromStatus = state.Status;
+        var oldValues = Snapshot(auction, fromStatus);
+
+        state.Status = AuctionStatus.Scheduled;
+        state.UpdatedAt = now;
+        state.RowVersion += 1;
+        auction.UpdatedAt = now;
+        auction.UpdatedBy = actor.UserId;
+
+        _dbContext.AuctionStatusHistories.Add(new AuctionStatusHistory
+        {
+            Id = Guid.NewGuid(),
+            AuctionId = auction.Id,
+            FromStatus = fromStatus,
+            ToStatus = AuctionStatus.Scheduled,
+            Reason = "Approved by admin/staff.",
+            ChangedBy = actor.UserId,
+            ChangedAt = now,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        _dbContext.AddAuditLog(
+            AuditAction.AuctionApprove, "Auction", auction.Id.ToString(),
+            oldValues: oldValues,
+            newValues: new { status = AuctionStatus.Scheduled.ToString() },
+            changedColumns: new[] { "status" },
+            userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+
+        await SaveAsync(null, cancellationToken);
+
+        await _notifier.AuctionStatusChangedAsync(
+            auction.Id, new AuctionStatusChangedMessage(auction.Id, AuctionStatus.Scheduled.ToString(), now), CancellationToken.None);
+
+        return new AuctionApprovalResponse(auction.Id, fromStatus, state.Status, null, now);
+    }
+
+    /// <summary>
+    /// Admin/Staff từ chối phiên đấu giá đang PendingApproval (bắt buộc nhập lý do).
+    /// Chuyển phiên sang Cancelled, xoá khoá phiên mở, mở khoá sản phẩm ở Catalog để Seller có thể tạo phiên khác, ghi lịch sử và audit.
+    /// </summary>
+    public async Task<AuctionApprovalResponse> RejectAuctionAsync(
+        ActorContext actor, Guid auctionId, RejectAuctionRequest request, CancellationToken cancellationToken = default)
+    {
+        if (auctionId == Guid.Empty)
+            throw Invalid("VAL_INVALID_IDENTIFIER", "Auction ID is required.");
+
+        var reason = request.Reason?.Trim();
+        if (string.IsNullOrEmpty(reason))
+            throw Invalid("VAL_REASON_REQUIRED", "Reason is required.");
+        if (reason.Length > MaxReasonLength)
+            throw Invalid("VAL_INVALID_REASON", $"Reason must be at most {MaxReasonLength} characters.");
+
+        var now = _clock.GetUtcNow();
+        var auction = await LoadForWriteAsync(auctionId, cancellationToken);
+        var state = auction.AuctionState!;
+
+        if (state.Status != AuctionStatus.PendingApproval)
+            throw new BusinessRuleValidationException(
+                "AUCTION_NOT_PENDING_APPROVAL", "Only an auction in PendingApproval status can be rejected.", 409);
+
+        var fromStatus = state.Status;
+        var oldValues = Snapshot(auction, fromStatus);
+
+        state.Status = AuctionStatus.Cancelled;
+        state.UpdatedAt = now;
+        state.RowVersion += 1;
+        auction.StockReleaseState = BackgroundSyncState.Pending;
+        auction.NextRetryAt = now;
+        auction.NeedsAttention = false;
+        auction.UpdatedAt = now;
+        auction.UpdatedBy = actor.UserId;
+
+        var openAuction = await _dbContext.ProductOpenAuctions
+            .FirstOrDefaultAsync(p => p.AuctionId == auction.Id, cancellationToken);
+        if (openAuction is not null)
+            _dbContext.ProductOpenAuctions.Remove(openAuction);
+
+        _dbContext.AuctionStatusHistories.Add(new AuctionStatusHistory
+        {
+            Id = Guid.NewGuid(),
+            AuctionId = auction.Id,
+            FromStatus = fromStatus,
+            ToStatus = AuctionStatus.Cancelled,
+            Reason = $"Rejected: {reason}",
+            ChangedBy = actor.UserId,
+            ChangedAt = now,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        _dbContext.AddAuditLog(
+            AuditAction.AuctionReject, "Auction", auction.Id.ToString(),
+            oldValues: oldValues,
+            newValues: new { status = AuctionStatus.Cancelled.ToString(), reason },
+            changedColumns: new[] { "status" },
+            userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+
+        _notifications.NotifyAuctionCancelled(new AuctionCancelledNotification(
+            auction.Id, auction.SellerId, auction.SnapshotProductTitle, reason, now, true, actor.TraceId));
+
+        await SaveAsync(null, cancellationToken);
+
+        _catalogSync.UnlockProduct(auction.ProductId, auction.Id);
+
+        await _notifier.AuctionCancelledAsync(
+            auction.Id, new AuctionCancelledMessage(auction.Id, now), CancellationToken.None);
+
+        return new AuctionApprovalResponse(auction.Id, fromStatus, state.Status, reason, now);
+    }
+
+    /// <summary>
+    /// Admin huỷ cưỡng chế phiên chưa kết thúc (Draft, PendingApproval, Scheduled, Running), kể cả phiên đã có người đặt giá (API 24). Bắt buộc có lý do.
     /// Đổi trạng thái sang Cancelled, đặt ReleasePending = true cho mọi cọc của phiên, nhả sản phẩm, ghi lịch sử, audit (đánh dấu forced) và báo realtime AuctionCancelled. Không trừ uy tín seller.
     /// </summary>
     public async Task<AuctionCancelledResponse> ForceCancelAsync(
@@ -2997,7 +3195,7 @@ public sealed class AuctionService : IAuctionService
 
         var reason = request.Reason?.Trim();
         if (string.IsNullOrEmpty(reason))
-            throw Invalid("REASON_REQUIRED", "Reason is required.");
+            throw Invalid("VAL_REASON_REQUIRED", "Reason is required.");
         if (reason.Length > MaxReasonLength)
             throw Invalid("VAL_INVALID_REASON", $"Reason must be at most {MaxReasonLength} characters.");
 
@@ -3010,8 +3208,8 @@ public sealed class AuctionService : IAuctionService
         if (state.Status is AuctionStatus.Ended or AuctionStatus.Settled or AuctionStatus.Failed)
             throw new DomainException("AUCTION_ALREADY_ENDED", "Only an auction that has not ended can be cancelled.", 409);
 
-        // Admin huỷ được phiên chưa kết thúc, kể cả phiên đang chạy đã có người đặt giá.
-        if (state.Status is not (AuctionStatus.Draft or AuctionStatus.Scheduled or AuctionStatus.Running))
+        // Admin huỷ được phiên chưa kết thúc, kể cả phiên đang chờ duyệt hoặc đang chạy đã có người đặt giá.
+        if (state.Status is not (AuctionStatus.Draft or AuctionStatus.PendingApproval or AuctionStatus.Scheduled or AuctionStatus.Running))
             throw new BusinessRuleValidationException(
                 "INVALID_STATE_TRANSITION", "Only an auction that has not ended can be cancelled.", 422);
 
@@ -3806,7 +4004,7 @@ public sealed class AuctionService : IAuctionService
         _dbContext.AuctionStatusHistories.Add(created.History);
         _dbContext.AddAuditLog(
             AuditAction.AuctionCreate, "Auction", created.Auction.Id.ToString(),
-            newValues: Snapshot(created.Auction, AuctionStatus.Scheduled),
+            newValues: Snapshot(created.Auction, AuctionStatus.PendingApproval),
             userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
 
         // Giữ sản phẩm ở Catalog (InAuction) và tạo phiên cùng thành công hoặc cùng thất bại: khoá trước, lưu phiên sau.
@@ -3824,7 +4022,7 @@ public sealed class AuctionService : IAuctionService
 
         var a = created.Auction;
         return new AuctionRecreatedResponse(
-            a.Id, source.Id, a.ProductId, a.SkuId, AuctionStatus.Scheduled,
+            a.Id, source.Id, a.ProductId, a.SkuId, AuctionStatus.PendingApproval,
             a.StartPriceAmount, a.BidStepAmount, a.ScheduledStartAt, a.OriginalEndAt, a.CreatedAt,
             a.ReservePriceAmount, a.BuyNowPriceAmount);
     }
@@ -3909,8 +4107,12 @@ public sealed class AuctionService : IAuctionService
 
         try
         {
-            foreach (var variant in await _catalog.GetVariantsAsync(skuIds, cancellationToken))
-                result[variant.VariantId] = variant.PrimaryImageUrl;
+            var variants = await _catalog.GetVariantsAsync(skuIds, cancellationToken);
+            if (variants is not null)
+            {
+                foreach (var variant in variants)
+                    result[variant.VariantId] = variant.PrimaryImageUrl;
+            }
         }
         catch (DomainException ex) when (ex.StatusCode >= 500)
         {
@@ -4101,7 +4303,7 @@ public sealed class AuctionService : IAuctionService
         {
             Id = Guid.NewGuid(),
             AuctionId = id,
-            Status = AuctionStatus.Scheduled,
+            Status = AuctionStatus.PendingApproval,
             ScheduledEndAt = end,
             RowVersion = 1,
             CreatedAt = now,
@@ -4122,7 +4324,7 @@ public sealed class AuctionService : IAuctionService
             Id = Guid.NewGuid(),
             AuctionId = id,
             FromStatus = null,
-            ToStatus = AuctionStatus.Scheduled,
+            ToStatus = AuctionStatus.PendingApproval,
             ChangedBy = sellerId,
             ChangedAt = now,
             CreatedAt = now,
@@ -4502,11 +4704,11 @@ public sealed class AuctionService : IAuctionService
         var state = auction.AuctionState
             ?? throw new DomainException("AUCTION_NOT_FOUND", "Auction state not found.", 404);
 
-        if (state.Status is not (AuctionStatus.Draft or AuctionStatus.Scheduled or AuctionStatus.Running))
+        if (state.Status is not (AuctionStatus.Draft or AuctionStatus.PendingApproval or AuctionStatus.Scheduled or AuctionStatus.Running))
         {
             throw new DomainException(
                 "INVALID_AUCTION_STATUS",
-                "Only draft, scheduled, or running auctions can have their schedule updated.",
+                "Only draft, pending approval, scheduled, or running auctions can have their schedule updated.",
                 409);
         }
 
@@ -4678,17 +4880,18 @@ public sealed class AuctionService : IAuctionService
         if (string.IsNullOrWhiteSpace(text))
             return null;
 
-        // Names only: "1" is not accepted as a status.
+        // Names only: "1" is not accepted as a status. Accept both PascalCase ("PendingApproval") and snake/upper ("PENDING_APPROVAL").
         var trimmed = text.Trim();
-        if (!int.TryParse(trimmed, out _) &&
-            Enum.TryParse<AuctionStatus>(trimmed, ignoreCase: true, out var parsed) &&
+        var normalized = trimmed.Replace("_", string.Empty);
+        if (!int.TryParse(normalized, out _) &&
+            Enum.TryParse<AuctionStatus>(normalized, ignoreCase: true, out var parsed) &&
             Enum.IsDefined(parsed))
         {
             return parsed;
         }
 
         throw Invalid("VAL_INVALID_STATUS",
-            "Status must be one of Draft, Scheduled, Running, Ended, Settled, Failed or Cancelled.");
+            "Status must be one of Draft, PendingApproval, Scheduled, Running, Ended, Settled, Failed or Cancelled.");
     }
 
     /// <summary>Dòng dữ liệu phẳng của một phiên đã chốt, dùng làm kết quả chiếu từ DB trước khi đổi thành AuctionSettlementDto.</summary>

@@ -61,7 +61,8 @@ public sealed record AuctionDetailDto(
     decimal? BuyNowPriceAmount = null,
     bool HasReservePrice = false,
     bool IsReserveMet = true,
-    bool BuyNowAvailable = false);
+    bool BuyNowAvailable = false,
+    string? LeadingBidderDisplayName = null);
 
 public sealed record AuctionStatusHistoryDto(
     Guid HistoryId,
@@ -266,7 +267,8 @@ public sealed record AdminAuctionSummaryDto(
     bool HasAttentionDeposit,
     bool HasOverdueSettlement,
     bool NeedsAttention,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    string? PrimaryImageUrl = null);
 
 public sealed record MyWatchlistItemDto(
     Guid AuctionId,
