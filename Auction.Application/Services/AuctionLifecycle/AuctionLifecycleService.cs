@@ -122,6 +122,10 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             oldValues: new { status = AuctionStatus.Scheduled.ToString() },
             newValues: new { status = AuctionStatus.Running.ToString(), startedAt = now });
 
+        _notifications.NotifyAuctionStarted(new AuctionStartedNotification(
+            auctionId, auction.SellerId, auction.SnapshotProductTitle,
+            auction.ScheduledStartAt, now, state.ScheduledEndAt));
+
         if (!await TrySaveAsync(cancellationToken))
             return false;
 

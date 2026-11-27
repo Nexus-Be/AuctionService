@@ -55,7 +55,41 @@ public interface INotificationClient
 
     /// <summary>Tells the seller that the winning buyer did not pay within the 24-hour payment deadline.</summary>
     void NotifyAuctionSellerPaymentTimeout(AuctionSellerPaymentTimeoutNotification notification);
+
+    /// <summary>Tells the seller that their auction has started running.</summary>
+    void NotifyAuctionStarted(AuctionStartedNotification notification);
+
+    /// <summary>Tells the seller that their newly created auction has been submitted and is awaiting staff approval.</summary>
+    void NotifyAuctionSubmitted(AuctionSubmittedNotification notification);
+
+    /// <summary>Tells the seller that their pending-approval auction has been approved by staff/admin and scheduled to start.</summary>
+    void NotifyAuctionApproved(AuctionApprovedNotification notification);
 }
+
+public sealed record AuctionSubmittedNotification(
+    Guid AuctionId,
+    Guid SellerUserId,
+    string? AuctionTitle,
+    DateTimeOffset ScheduledStartAt,
+    DateTimeOffset SubmittedAt,
+    string? TraceId = null);
+
+public sealed record AuctionApprovedNotification(
+    Guid AuctionId,
+    Guid SellerUserId,
+    string? AuctionTitle,
+    DateTimeOffset ScheduledStartAt,
+    DateTimeOffset ApprovedAt,
+    string? TraceId = null);
+
+public sealed record AuctionStartedNotification(
+    Guid AuctionId,
+    Guid SellerUserId,
+    string? AuctionTitle,
+    DateTimeOffset ScheduledStartAt,
+    DateTimeOffset StartedAt,
+    DateTimeOffset AuctionEndsAt,
+    string? TraceId = null);
 
 public sealed record AuctionSellerResultNotification(
     Guid AuctionId,

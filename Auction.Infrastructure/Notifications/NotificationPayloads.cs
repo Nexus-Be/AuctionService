@@ -28,6 +28,8 @@ public static class NotificationPayloads
     public const string SellerResult = "auction-seller-results";
     public const string PaymentTimeout = "auction-payment-timeouts";
     public const string SellerPaymentTimeout = "auction-seller-payment-timeouts";
+    public const string Started = "auction-starts";
+    public const string InApp = "in-app";
 
     /// <summary>One serializer for queueing and for sending, so the stored payload and the sent body are the same text.</summary>
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
@@ -42,7 +44,7 @@ public static class NotificationPayloads
     // ------------------------------------------------------------------ event ids
 
     public static Guid OutbidId(BidOutbidNotification n) => DeterministicGuid($"auction-outbid:{n.TriggerBidId:N}");
-    public static Guid WinnerId(AuctionWinnerNotification n) => DeterministicGuid($"auction-winner:{n.AuctionId:N}:{n.ResultId:N}");
+    public static Guid WinnerId(AuctionWinnerNotification n) => DeterministicGuid($"auction-winner:{n.AuctionId:N}:{n.ResultId:N}:{n.WinnerUserId:N}");
     public static Guid FailedId(AuctionFailedNotification n) => DeterministicGuid($"auction-failed:{n.AuctionId:N}:{n.FailedAt:O}");
     public static Guid CancelledId(AuctionCancelledNotification n) => DeterministicGuid($"auction-cancelled:{n.AuctionId:N}:{n.CancelledAt:O}");
     public static Guid OfferId(ReplacementWinnerOfferNotification n) => DeterministicGuid($"auction-winner-offer:{n.OfferId:N}");
@@ -52,9 +54,12 @@ public static class NotificationPayloads
     public static Guid ReserveApprovalId(ReserveApprovalNeededNotification n) => DeterministicGuid($"auction-reserve-approval:{n.AuctionId:N}:{n.ApprovalDeadlineAt:O}");
     public static Guid ReserveRestrictionId(ReserveRestrictionNotification n) => DeterministicGuid($"auction-reserve-restriction:{n.SellerUserId:N}:{n.ConsecutiveDeclineCount}:{n.OccurredAt:O}");
     public static Guid DepositId(AuctionDepositNotification n) => DeterministicGuid($"auction-deposit:{n.DepositId:N}:{n.DepositStatus}");
-    public static Guid SellerResultId(AuctionSellerResultNotification n) => DeterministicGuid($"auction-seller-result:{n.AuctionId:N}:{n.ResultId:N}:{n.Outcome}");
+    public static Guid SellerResultId(AuctionSellerResultNotification n) => DeterministicGuid($"auction-seller-result:{n.AuctionId:N}:{n.ResultId:N}:{n.Outcome}:{n.WinnerUserId}");
     public static Guid PaymentTimeoutId(AuctionPaymentTimeoutNotification n) => DeterministicGuid($"auction-payment-timeout:{n.AuctionId:N}:{n.OrderId:N}:{n.WinnerUserId:N}");
     public static Guid SellerPaymentTimeoutId(AuctionSellerPaymentTimeoutNotification n) => DeterministicGuid($"auction-seller-payment-timeout:{n.AuctionId:N}:{n.OrderId:N}:{n.WinnerUserId:N}");
+    public static Guid StartedId(AuctionStartedNotification n) => DeterministicGuid($"auction-start:{n.AuctionId:N}:{n.StartedAt:O}");
+    public static Guid SubmittedId(AuctionSubmittedNotification n) => DeterministicGuid($"auction-submitted:{n.AuctionId:N}:{n.SubmittedAt:O}");
+    public static Guid ApprovedId(AuctionApprovedNotification n) => DeterministicGuid($"auction-approved:{n.AuctionId:N}:{n.ApprovedAt:O}");
 
     // ------------------------------------------------------------------ bodies
 
@@ -277,6 +282,61 @@ public static class NotificationPayloads
         timedOutAt = n.TimedOutAt,
         traceId = Clip(n.TraceId, 100)
     };
+
+    public static object BuildStarted(AuctionStartedNotification n) => new
+    {
+        sourceEventId = StartedId(n),
+        auctionId = n.AuctionId,
+        sellerUserId = n.SellerUserId,
+        auctionTitle = CleanTitle(n.AuctionTitle),
+        auctionStatus = "Active",
+        scheduledStartAt = n.ScheduledStartAt,
+        startedAt = n.StartedAt,
+        auctionEndsAt = n.AuctionEndsAt,
+        traceId = Clip(n.TraceId, 100)
+    };
+
+    public static object BuildSubmitted(AuctionSubmittedNotification n)
+    {
+        var title = CleanTitle(n.AuctionTitle);
+        var vnStart = n.ScheduledStartAt.ToOffset(TimeSpan.FromHours(7)).ToString("HH:mm dd/MM/yyyy");
+        return new
+        {
+            sourceEventId = SubmittedId(n),
+            userId = n.SellerUserId,
+            title = "Phiên đấu giá đang chờ duyệt",
+            body = $"Phiên đấu giá \"{title}\" (lịch mở bán {vnStart}) đã được tạo thành công và đang chờ nhân viên sàn phê duyệt.",
+            notificationType = "AuctionStarted",
+            payload = JsonSerializer.Serialize(new
+            {
+                type = "AuctionStarted",
+                auctionId = n.AuctionId,
+                audience = "seller",
+                status = "PendingApproval"
+            }, Json)
+        };
+    }
+
+    public static object BuildApproved(AuctionApprovedNotification n)
+    {
+        var title = CleanTitle(n.AuctionTitle);
+        var vnStart = n.ScheduledStartAt.ToOffset(TimeSpan.FromHours(7)).ToString("HH:mm dd/MM/yyyy");
+        return new
+        {
+            sourceEventId = ApprovedId(n),
+            userId = n.SellerUserId,
+            title = "Phiên đấu giá đã được duyệt",
+            body = $"Phiên đấu giá \"{title}\" đã được phê duyệt và sẽ tự động mở bán vào lúc {vnStart}.",
+            notificationType = "AuctionStarted",
+            payload = JsonSerializer.Serialize(new
+            {
+                type = "AuctionStarted",
+                auctionId = n.AuctionId,
+                audience = "seller",
+                status = "Scheduled"
+            }, Json)
+        };
+    }
 
     // ------------------------------------------------------------------ helpers
 

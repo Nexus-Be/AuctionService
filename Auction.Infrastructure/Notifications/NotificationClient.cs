@@ -149,6 +149,18 @@ public sealed class NotificationClient : INotificationClient
         Add(NotificationPayloads.SellerPaymentTimeout, notification.AuctionId, NotificationPayloads.SellerPaymentTimeoutId(notification),
             NotificationPayloads.BuildSellerPaymentTimeout(notification), context: null);
 
+    public void NotifyAuctionStarted(AuctionStartedNotification notification) =>
+        Add(NotificationPayloads.Started, notification.AuctionId, NotificationPayloads.StartedId(notification),
+            NotificationPayloads.BuildStarted(notification), context: null);
+
+    public void NotifyAuctionSubmitted(AuctionSubmittedNotification notification) =>
+        Add(NotificationPayloads.InApp, notification.AuctionId, NotificationPayloads.SubmittedId(notification),
+            NotificationPayloads.BuildSubmitted(notification), context: null);
+
+    public void NotifyAuctionApproved(AuctionApprovedNotification notification) =>
+        Add(NotificationPayloads.InApp, notification.AuctionId, NotificationPayloads.ApprovedId(notification),
+            NotificationPayloads.BuildApproved(notification), context: null);
+
     private void Add(string kind, Guid auctionId, Guid eventId, object? payload, object? context)
     {
         if (!_options.Enabled)
