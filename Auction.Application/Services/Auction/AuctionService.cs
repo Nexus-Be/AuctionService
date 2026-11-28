@@ -1276,10 +1276,8 @@ public sealed class AuctionService : IAuctionService
         if (settlement.SellerApprovalDeadlineAt is { } deadline && deadline <= now)
             throw new DomainException("SELLER_APPROVAL_EXPIRED", "The 12-hour seller approval window has expired.", 409);
 
-        var paymentDeadline = now.Add(WinnerPaymentWindow);
-        settlement.Status = AuctionSettlementStatus.PendingPayment;
-        settlement.PaymentDeadlineAt = paymentDeadline;
-        settlement.UpdatedAt = now;
+        var pendingOffer = await _dbContext.AuctionWinnerOffers
+            .FirstOrDefaultAsync(o => o.AuctionId == auctionId && o.Status == AuctionWinnerOfferStatus.Pending && !o.IsDeleted, cancellationToken);
 
         // Reset seller's consecutive decline streak ONLY when they approve a below-reserve sale.
         var penalty = await _dbContext.SellerReservePenalties
@@ -1289,6 +1287,38 @@ public sealed class AuctionService : IAuctionService
             penalty.ConsecutiveDeclineCount = 0;
             penalty.UpdatedAt = now;
         }
+
+        if (pendingOffer is not null)
+        {
+            // Second-chance offer below reserve: seller approved, now notify the runner-up and give them 24h to accept.
+            pendingOffer.OfferedAt = now;
+            pendingOffer.ExpiresAt = now.AddHours(AuctionRules.WinnerOfferWindowHours);
+            pendingOffer.UpdatedAt = now;
+            settlement.Status = AuctionSettlementStatus.Expired;
+            settlement.UpdatedAt = now;
+
+            _dbContext.AddAuditLog(
+                AuditAction.ReserveApprovalAccept, "Auction", auctionId.ToString(),
+                oldValues: new { settlementStatus = AuctionSettlementStatus.AwaitingSellerApproval.ToString() },
+                newValues: new { settlementStatus = settlement.Status.ToString(), offerId = pendingOffer.Id, acceptedPrice = pendingOffer.Amount, offerExpiresAt = pendingOffer.ExpiresAt },
+                userId: actor.UserId.ToString(), ipAddress: actor.ClientIp, traceId: actor.TraceId);
+
+            _notifications.NotifyReplacementWinnerOffer(new ReplacementWinnerOfferNotification(
+                auctionId, pendingOffer.Id, pendingOffer.BidId, pendingOffer.BidderId,
+                auction.AuctionResult?.WinnerId ?? Guid.Empty, auction.SellerId,
+                auction.SnapshotProductTitle, pendingOffer.Amount, pendingOffer.OfferedAt, pendingOffer.ExpiresAt, actor.TraceId));
+
+            await SaveAsync(null, cancellationToken);
+
+            return new ReserveApprovalResponse(
+                auctionId, auction.AuctionState.Status, settlement.Status, pendingOffer.Amount,
+                pendingOffer.ExpiresAt, penalty?.ConsecutiveDeclineCount ?? 0, penalty?.ReserveRestrictedUntil, now);
+        }
+
+        var paymentDeadline = now.Add(WinnerPaymentWindow);
+        settlement.Status = AuctionSettlementStatus.PendingPayment;
+        settlement.PaymentDeadlineAt = paymentDeadline;
+        settlement.UpdatedAt = now;
 
         _dbContext.AddAuditLog(
             AuditAction.ReserveApprovalAccept, "Auction", auctionId.ToString(),
@@ -1351,6 +1381,14 @@ public sealed class AuctionService : IAuctionService
 
         settlement.Status = AuctionSettlementStatus.Cancelled;
         settlement.UpdatedAt = now;
+
+        var pendingOffer = await _dbContext.AuctionWinnerOffers
+            .FirstOrDefaultAsync(o => o.AuctionId == auctionId && o.Status == AuctionWinnerOfferStatus.Pending && !o.IsDeleted, cancellationToken);
+        if (pendingOffer is not null)
+        {
+            pendingOffer.Status = AuctionWinnerOfferStatus.Expired;
+            pendingOffer.UpdatedAt = now;
+        }
 
         state.Status = AuctionStatus.Failed;
         state.UpdatedAt = now;
@@ -2157,6 +2195,16 @@ public sealed class AuctionService : IAuctionService
             offer = await TryCreateWinnerOfferAsync(auctionId, auction.ProductId, winnerId, now, cancellationToken);
         }
 
+        var secondChanceNeedsSellerApproval = offer is not null
+            && auction.ReservePriceAmount is { } reservePrice
+            && offer.Amount < reservePrice;
+        if (secondChanceNeedsSellerApproval)
+        {
+            auction.AuctionSettlement.Status = AuctionSettlementStatus.AwaitingSellerApproval;
+            auction.AuctionSettlement.SellerApprovalDeadlineAt = now.AddHours(12);
+            auction.AuctionSettlement.IsBelowReserve = true;
+        }
+
         // Đặt việc nền trong cùng transaction (Overview 4.1 & quy tắc giữ cọc Top 2):
         // - Paid: báo User reset Streak (API 25) + Capture cọc OrderPayment của người vừa thanh toán (Winner hoặc Người về nhì).
         // - Expired/Failed/PaymentTimedOut: báo User ghi nhận vi phạm (API 20) + Capture cọc Forfeit của người bỏ kèo (Winner hoặc Người về nhì).
@@ -2323,9 +2371,19 @@ public sealed class AuctionService : IAuctionService
             }
             else if (offer is not null)
             {
-                _notifications.NotifyReplacementWinnerOffer(new ReplacementWinnerOfferNotification(
-                    auctionId, offer.Id, offer.BidId, offer.BidderId, winnerId, auction.SellerId,
-                    auction.SnapshotProductTitle, offer.Amount, offer.OfferedAt, offer.ExpiresAt, null));
+                if (secondChanceNeedsSellerApproval)
+                {
+                    _notifications.NotifyReserveApprovalNeeded(new ReserveApprovalNeededNotification(
+                        auctionId, auction.SellerId, auction.SnapshotProductTitle,
+                        offer.Amount, auction.ReservePriceAmount!.Value,
+                        auction.AuctionSettlement!.SellerApprovalDeadlineAt!.Value, null));
+                }
+                else
+                {
+                    _notifications.NotifyReplacementWinnerOffer(new ReplacementWinnerOfferNotification(
+                        auctionId, offer.Id, offer.BidId, offer.BidderId, winnerId, auction.SellerId,
+                        auction.SnapshotProductTitle, offer.Amount, offer.OfferedAt, offer.ExpiresAt, null));
+                }
             }
         }
         else if (offer is null && state.Status == AuctionStatus.Failed)
@@ -2336,9 +2394,19 @@ public sealed class AuctionService : IAuctionService
         }
         else if (offer is not null)
         {
-            _notifications.NotifyReplacementWinnerOffer(new ReplacementWinnerOfferNotification(
-                auctionId, offer.Id, offer.BidId, offer.BidderId, winnerId, auction.SellerId,
-                auction.SnapshotProductTitle, offer.Amount, offer.OfferedAt, offer.ExpiresAt, null));
+            if (secondChanceNeedsSellerApproval)
+            {
+                _notifications.NotifyReserveApprovalNeeded(new ReserveApprovalNeededNotification(
+                    auctionId, auction.SellerId, auction.SnapshotProductTitle,
+                    offer.Amount, auction.ReservePriceAmount!.Value,
+                    auction.AuctionSettlement!.SellerApprovalDeadlineAt!.Value, null));
+            }
+            else
+            {
+                _notifications.NotifyReplacementWinnerOffer(new ReplacementWinnerOfferNotification(
+                    auctionId, offer.Id, offer.BidId, offer.BidderId, winnerId, auction.SellerId,
+                    auction.SnapshotProductTitle, offer.Amount, offer.OfferedAt, offer.ExpiresAt, null));
+            }
         }
 
         await SaveAsync(null, cancellationToken);
@@ -3380,6 +3448,8 @@ public sealed class AuctionService : IAuctionService
     {
         var now = _clock.GetUtcNow();
         var (auction, offer) = await LoadPendingOfferAsync(actor, auctionId, offerId, now, cancellationToken);
+        if (auction.AuctionSettlement?.Status == AuctionSettlementStatus.AwaitingSellerApproval)
+            throw new DomainException("SELLER_APPROVAL_REQUIRED", "The seller has not approved selling below the reserve price yet.", 409);
         var state = auction.AuctionState!;
 
         var result = auction.AuctionResult;
