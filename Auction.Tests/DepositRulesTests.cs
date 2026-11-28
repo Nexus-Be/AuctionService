@@ -319,9 +319,9 @@ public class BidRulesTests
     }
 
     [Fact]
-    public void The_first_bid_must_reach_the_start_price_and_later_bids_must_add_one_step()
+    public void The_first_bid_must_add_one_step_to_start_price_and_later_bids_must_add_one_step()
     {
-        BidRules.MinNextBid(1_000_000m, 50_000m, null).Should().Be(1_000_000m);
+        BidRules.MinNextBid(1_000_000m, 50_000m, null).Should().Be(1_050_000m);
         BidRules.MinNextBid(1_000_000m, 50_000m, 1_200_000m).Should().Be(1_250_000m);
 
         var low = () => BidRules.EnsureMeetsMinimum(1_249_999m, 1_250_000m);

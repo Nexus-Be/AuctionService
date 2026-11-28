@@ -99,10 +99,10 @@ public class AuctionRulesTests
     }
 
     [Theory]
-    [InlineData(1_000_000, 100_000, null, 1_000_000)]
+    [InlineData(1_000_000, 100_000, null, 1_100_000)]
     [InlineData(0, 50_000, null, 50_000)]
     [InlineData(1_000_000, 100_000, 1_000_000, 1_100_000)]
-    public void MinNextBid_FirstBidUsesStartPriceOrOneStepWhenStartIsZero(
+    public void MinNextBid_FirstBidAddsOneStepToStartPrice(
         int startPrice, int bidStep, int? currentPrice, int expected)
     {
         BidRules.MinNextBid(startPrice, bidStep, currentPrice).Should().Be(expected);

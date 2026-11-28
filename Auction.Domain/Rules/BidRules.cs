@@ -65,13 +65,11 @@ public static class BidRules
     }
 
     /// <summary>
-    /// The first bid must reach the start price (or at least one bid step when the start price is 0).
-    /// Later bids must add at least one bid step.
+    /// The first bid must be at least the start price plus one bid step.
+    /// Later bids must add at least one bid step to the current price.
     /// </summary>
     public static decimal MinNextBid(decimal startPriceAmount, decimal bidStepAmount, decimal? currentPriceAmount) =>
-        currentPriceAmount is null
-            ? (startPriceAmount > 0m ? startPriceAmount : bidStepAmount)
-            : currentPriceAmount.Value + bidStepAmount;
+        (currentPriceAmount ?? startPriceAmount) + bidStepAmount;
 
     public static void EnsureMeetsMinimum(decimal amount, decimal minNextBidAmount)
     {
