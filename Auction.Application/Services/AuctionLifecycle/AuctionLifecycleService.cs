@@ -337,11 +337,26 @@ public sealed class AuctionLifecycleService : IAuctionLifecycleService
             _notifications.NotifyAuctionSellerResult(new AuctionSellerResultNotification(
                 auctionId, winnerNotice.ResultId, auction.SellerId, "WinnerSelected", auction.SnapshotProductTitle,
                 now, winnerNotice.WinningBidId, winnerNotice.WinnerUserId, null, winnerNotice.WinningAmount, winnerNotice.PaymentDeadline));
+
+            var loserIds = await _dbContext.Bids
+                .AsNoTracking()
+                .Where(b => b.AuctionId == auctionId && b.BidderId != winnerNotice.WinnerUserId && !b.IsDeleted && b.BidInvalidation == null)
+                .Select(b => b.BidderId)
+                .Distinct()
+                .ToListAsync(cancellationToken);
+            if (loserIds.Count > 0)
+            {
+                _notifications.NotifyAuctionLosers(new AuctionLosersNotification(
+                    auctionId, auction.SnapshotProductTitle, loserIds, now));
+            }
         }
         else if (isBelowReserve && winningBid is not null && auction.ReservePriceAmount is { } reservePrice)
         {
+            var approvalDeadline = now.AddHours(AuctionRules.SellerReserveApprovalWindowHours);
             _notifications.NotifyReserveApprovalNeeded(new ReserveApprovalNeededNotification(
-                auctionId, auction.SellerId, auction.SnapshotProductTitle, winningBid.Amount, reservePrice, now.AddHours(AuctionRules.SellerReserveApprovalWindowHours)));
+                auctionId, auction.SellerId, auction.SnapshotProductTitle, winningBid.Amount, reservePrice, approvalDeadline));
+            _notifications.NotifyBuyerBelowReservePending(new BuyerBelowReservePendingNotification(
+                auctionId, winningBid.BidderId, auction.SnapshotProductTitle, winningBid.Amount, approvalDeadline));
         }
         else if (winningBid is null)
         {

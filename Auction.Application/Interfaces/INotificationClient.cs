@@ -64,7 +64,39 @@ public interface INotificationClient
 
     /// <summary>Tells the seller that their pending-approval auction has been approved by staff/admin and scheduled to start.</summary>
     void NotifyAuctionApproved(AuctionApprovedNotification notification);
+
+    /// <summary>Tells the highest bidder that the auction ended below the reserve price and is awaiting seller approval.</summary>
+    void NotifyBuyerBelowReservePending(BuyerBelowReservePendingNotification notification);
+
+    /// <summary>Tells the highest bidder why the auction failed when the seller declined selling below the reserve price.</summary>
+    void NotifyBuyerBelowReserveRejected(BuyerBelowReserveRejectedNotification notification);
+
+    /// <summary>Sends a condolence in-app notification to bidders who participated in the auction but did not win.</summary>
+    void NotifyAuctionLosers(AuctionLosersNotification notification);
 }
+
+public sealed record BuyerBelowReservePendingNotification(
+    Guid AuctionId,
+    Guid BuyerUserId,
+    string? AuctionTitle,
+    decimal HighestBidAmount,
+    DateTimeOffset ApprovalDeadlineAt,
+    string? TraceId = null);
+
+public sealed record BuyerBelowReserveRejectedNotification(
+    Guid AuctionId,
+    Guid BuyerUserId,
+    string? AuctionTitle,
+    string? Reason,
+    DateTimeOffset RejectedAt,
+    string? TraceId = null);
+
+public sealed record AuctionLosersNotification(
+    Guid AuctionId,
+    string? AuctionTitle,
+    IReadOnlyList<Guid> LoserUserIds,
+    DateTimeOffset EndedAt,
+    string? TraceId = null);
 
 public sealed record AuctionSubmittedNotification(
     Guid AuctionId,

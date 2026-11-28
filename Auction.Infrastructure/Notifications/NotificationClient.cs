@@ -161,6 +161,23 @@ public sealed class NotificationClient : INotificationClient
         Add(NotificationPayloads.InApp, notification.AuctionId, NotificationPayloads.ApprovedId(notification),
             NotificationPayloads.BuildApproved(notification), context: null);
 
+    public void NotifyBuyerBelowReservePending(BuyerBelowReservePendingNotification notification) =>
+        Add(NotificationPayloads.InApp, notification.AuctionId, NotificationPayloads.BuyerBelowReservePendingId(notification),
+            NotificationPayloads.BuildBuyerBelowReservePending(notification), context: null);
+
+    public void NotifyBuyerBelowReserveRejected(BuyerBelowReserveRejectedNotification notification) =>
+        Add(NotificationPayloads.InApp, notification.AuctionId, NotificationPayloads.BuyerBelowReserveRejectedId(notification),
+            NotificationPayloads.BuildBuyerBelowReserveRejected(notification), context: null);
+
+    public void NotifyAuctionLosers(AuctionLosersNotification notification)
+    {
+        foreach (var loserId in notification.LoserUserIds.Distinct())
+        {
+            Add(NotificationPayloads.InApp, notification.AuctionId, NotificationPayloads.LoserId(notification.AuctionId, loserId),
+                NotificationPayloads.BuildLoser(notification.AuctionId, loserId, notification.AuctionTitle), context: null);
+        }
+    }
+
     private void Add(string kind, Guid auctionId, Guid eventId, object? payload, object? context)
     {
         if (!_options.Enabled)

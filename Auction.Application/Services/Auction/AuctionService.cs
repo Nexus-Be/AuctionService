@@ -1216,6 +1216,18 @@ public sealed class AuctionService : IAuctionService
             auctionId, result.Id, auction.SellerId, "WinnerSelected", auction.SnapshotProductTitle,
             now, buyNowBid.Id, actor.UserId, null, buyNowPrice, paymentDeadline, actor.TraceId));
 
+        var buyNowLoserIds = await _dbContext.Bids
+            .AsNoTracking()
+            .Where(b => b.AuctionId == auctionId && b.BidderId != actor.UserId && !b.IsDeleted && b.BidInvalidation == null)
+            .Select(b => b.BidderId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+        if (buyNowLoserIds.Count > 0)
+        {
+            _notifications.NotifyAuctionLosers(new AuctionLosersNotification(
+                auctionId, auction.SnapshotProductTitle, buyNowLoserIds, now, actor.TraceId));
+        }
+
         try
         {
             await SaveAsync(null, cancellationToken);
@@ -1453,6 +1465,17 @@ public sealed class AuctionService : IAuctionService
         _notifications.NotifyReserveRestriction(new ReserveRestrictionNotification(
             auctionId, auction.SellerId, penalty.ConsecutiveDeclineCount,
             penalty.ConsecutiveDeclineCount >= AuctionRules.MaxConsecutiveReserveDeclines, penalty.ReserveRestrictedUntil, now, actor.TraceId));
+
+        var rejectedWinnerId = await _dbContext.AuctionResults
+            .AsNoTracking()
+            .Where(r => r.AuctionId == auctionId && !r.IsDeleted)
+            .Select(r => r.WinnerId)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (rejectedWinnerId is { } buyerId)
+        {
+            _notifications.NotifyBuyerBelowReserveRejected(new BuyerBelowReserveRejectedNotification(
+                auctionId, buyerId, auction.SnapshotProductTitle, reason, now, actor.TraceId));
+        }
 
         await SaveAsync(null, cancellationToken);
 
@@ -4877,6 +4900,8 @@ public sealed class AuctionService : IAuctionService
         }
 
         var auction = await _dbContext.Auctions
+            .Include(a => a.AuctionState)
+            .Include(a => a.AuctionResult)
             .Include(a => a.AuctionSettlement)
             .Include(a => a.WinnerOffers)
             .FirstOrDefaultAsync(a => a.Id == auctionId && !a.IsDeleted, cancellationToken)
@@ -4937,6 +4962,76 @@ public sealed class AuctionService : IAuctionService
         }
 
         await _dbContext.SaveChangesAsync(cancellationToken);
+
+        // When Admin explicitly sets payment remaining seconds to 0 (QA / demo), immediately trigger PaymentTimedOut
+        // so deposit forfeiture and second-chance offer creation happen without waiting for Commerce's cron.
+        if (hasPaymentInput
+            && request.PaymentRemainingSeconds == 0
+            && settlement is { OrderId: { } orderId }
+            && auction.AuctionResult?.WinnerId is { } winnerId)
+        {
+            await HandlePaymentStatusAsync(
+                auctionId,
+                new SettlementPaymentStatusRequest(
+                    orderId,
+                    winnerId,
+                    SettlementPaymentStatus.PaymentTimedOut,
+                    null,
+                    null,
+                    $"admin-force-timeout:{auctionId:N}:{orderId:N}:{now.ToUnixTimeMilliseconds()}"),
+                cancellationToken);
+        }
+
+        // When Admin explicitly sets winner offer remaining seconds to 0 (QA / demo), immediately expire the offer
+        // and fail the auction, releasing the runner-up's deposit and unlocking the product.
+        if (hasOfferInput
+            && request.WinnerOfferRemainingSeconds == 0
+            && pendingOffer is not null
+            && pendingOffer.Status == AuctionWinnerOfferStatus.Pending
+            && auction.AuctionState is { Status: AuctionStatus.Ended } offerState)
+        {
+            pendingOffer.Status = AuctionWinnerOfferStatus.Expired;
+            pendingOffer.UpdatedAt = now;
+
+            offerState.Status = AuctionStatus.Failed;
+            offerState.UpdatedAt = now;
+            offerState.RowVersion += 1;
+            auction.StockReleaseState = BackgroundSyncState.Pending;
+            auction.NextRetryAt = now;
+            auction.NeedsAttention = false;
+
+            var depositsToRelease = await MarkDepositsForReleaseAsync(auctionId, "SECOND_CHANCE_EXPIRED", now, actor, cancellationToken);
+            var openAuction = await _dbContext.ProductOpenAuctions
+                .FirstOrDefaultAsync(p => p.AuctionId == auctionId, cancellationToken);
+            if (openAuction is not null)
+                _dbContext.ProductOpenAuctions.Remove(openAuction);
+
+            _dbContext.AuctionStatusHistories.Add(new AuctionStatusHistory
+            {
+                Id = Guid.NewGuid(),
+                AuctionId = auctionId,
+                FromStatus = AuctionStatus.Ended,
+                ToStatus = AuctionStatus.Failed,
+                Reason = "The second-chance offer expired (triggered by admin).",
+                ChangedBy = actor.UserId,
+                ChangedAt = now,
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+
+            _notifications.NotifyAuctionFailed(new AuctionFailedNotification(
+                auctionId, auction.SellerId, auction.SnapshotProductTitle,
+                "The second-chance offer expired.", now, actor.TraceId));
+
+            await SaveAsync(null, cancellationToken);
+
+            if (depositsToRelease > 0)
+                await _deposits.ReleasePendingDepositsForAuctionAsync(auctionId, cancellationToken);
+
+            _catalogSync.UnlockProduct(auction.ProductId, auctionId);
+            await _notifier.AuctionStatusChangedAsync(
+                auctionId, new AuctionStatusChangedMessage(auctionId, offerState.Status.ToString(), now), CancellationToken.None);
+        }
 
         return new AdminSettlementDeadlinesUpdatedResponse(
             auction.Id,

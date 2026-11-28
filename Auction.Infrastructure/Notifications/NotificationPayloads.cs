@@ -60,6 +60,9 @@ public static class NotificationPayloads
     public static Guid StartedId(AuctionStartedNotification n) => DeterministicGuid($"auction-start:{n.AuctionId:N}:{n.StartedAt:O}");
     public static Guid SubmittedId(AuctionSubmittedNotification n) => DeterministicGuid($"auction-submitted:{n.AuctionId:N}:{n.SubmittedAt:O}");
     public static Guid ApprovedId(AuctionApprovedNotification n) => DeterministicGuid($"auction-approved:{n.AuctionId:N}:{n.ApprovedAt:O}");
+    public static Guid BuyerBelowReservePendingId(BuyerBelowReservePendingNotification n) => DeterministicGuid($"auction-buyer-below-reserve-pending:{n.AuctionId:N}:{n.BuyerUserId:N}");
+    public static Guid BuyerBelowReserveRejectedId(BuyerBelowReserveRejectedNotification n) => DeterministicGuid($"auction-buyer-below-reserve-rejected:{n.AuctionId:N}:{n.BuyerUserId:N}:{n.RejectedAt:O}");
+    public static Guid LoserId(Guid auctionId, Guid loserUserId) => DeterministicGuid($"auction-loser:{auctionId:N}:{loserUserId:N}");
 
     // ------------------------------------------------------------------ bodies
 
@@ -334,6 +337,69 @@ public static class NotificationPayloads
                 auctionId = n.AuctionId,
                 audience = "seller",
                 status = "Scheduled"
+            }, Json)
+        };
+    }
+
+    public static object BuildBuyerBelowReservePending(BuyerBelowReservePendingNotification n)
+    {
+        var title = CleanTitle(n.AuctionTitle);
+        var vnDeadline = n.ApprovalDeadlineAt.ToOffset(TimeSpan.FromHours(7)).ToString("HH:mm dd/MM/yyyy");
+        var priceText = n.HighestBidAmount.ToString("N0", System.Globalization.CultureInfo.InvariantCulture);
+        return new
+        {
+            sourceEventId = BuyerBelowReservePendingId(n),
+            userId = n.BuyerUserId,
+            title = "Đang chờ người bán xác nhận giá dưới sàn",
+            body = $"Phiên \"{title}\" đã kết thúc với mức giá cao nhất của bạn là {priceText} đ (thấp hơn giá sàn). Người bán có thời hạn đến {vnDeadline} để xác nhận có bán hay không.",
+            notificationType = "AuctionWon",
+            payload = JsonSerializer.Serialize(new
+            {
+                type = "AuctionWon",
+                auctionId = n.AuctionId,
+                audience = "buyer",
+                status = "AwaitingSellerApproval"
+            }, Json)
+        };
+    }
+
+    public static object BuildBuyerBelowReserveRejected(BuyerBelowReserveRejectedNotification n)
+    {
+        var title = CleanTitle(n.AuctionTitle);
+        var reasonText = string.IsNullOrWhiteSpace(n.Reason) ? "Người bán không đồng ý bán dưới giá sàn." : n.Reason.Trim();
+        return new
+        {
+            sourceEventId = BuyerBelowReserveRejectedId(n),
+            userId = n.BuyerUserId,
+            title = "Người bán từ chối bán dưới giá sàn",
+            body = $"Phiên \"{title}\" đã kết thúc không thành công vì người bán từ chối bán dưới giá sàn ({reasonText}). Tiền cọc của bạn đã được hoàn lại.",
+            notificationType = "AuctionDeposit",
+            payload = JsonSerializer.Serialize(new
+            {
+                type = "AuctionDeposit",
+                auctionId = n.AuctionId,
+                audience = "buyer",
+                status = "Failed"
+            }, Json)
+        };
+    }
+
+    public static object BuildLoser(Guid auctionId, Guid loserUserId, string? auctionTitle)
+    {
+        var title = CleanTitle(auctionTitle);
+        return new
+        {
+            sourceEventId = LoserId(auctionId, loserUserId),
+            userId = loserUserId,
+            title = "Phiên đấu giá đã kết thúc",
+            body = $"Rất tiếc bạn chưa thắng phiên đấu giá \"{title}\". Tiền cọc của bạn sẽ được hoàn lại theo quy định.",
+            notificationType = "AuctionDeposit",
+            payload = JsonSerializer.Serialize(new
+            {
+                type = "AuctionDeposit",
+                auctionId,
+                audience = "buyer",
+                status = "Lost"
             }, Json)
         };
     }
